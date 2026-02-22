@@ -138,6 +138,13 @@ if st.session_state.state == 2:
     total_count = len(sorted_scores)
     review_idx = st.session_state.review_idx
 
+    # ボタン起因の変更をチェックボックスwidget keyに事前反映
+    # (widget描画前でないとsession_stateへの書き込みがエラーになるため)
+    if st.session_state.get("_sync_checkboxes"):
+        for s_idx in st.session_state.segment_enabled:
+            st.session_state[f"sb_cb_{s_idx}"] = st.session_state.segment_enabled[s_idx]
+        del st.session_state._sync_checkboxes
+
     # 有効セットと推定時間
     enabled_set = {
         idx for idx, v in st.session_state.segment_enabled.items() if v
@@ -161,11 +168,13 @@ if st.session_state.state == 2:
             if st.button("全選択"):
                 for key in st.session_state.segment_enabled:
                     st.session_state.segment_enabled[key] = True
+                st.session_state._sync_checkboxes = True
                 st.rerun()
         with col_none:
             if st.button("全解除"):
                 for key in st.session_state.segment_enabled:
                     st.session_state.segment_enabled[key] = False
+                st.session_state._sync_checkboxes = True
                 st.rerun()
 
         scene_container = st.container(height=600)
@@ -237,11 +246,13 @@ if st.session_state.state == 2:
         with col_yes:
             if st.button("はい"):
                 st.session_state.segment_enabled[idx] = True
+                st.session_state._sync_checkboxes = True
                 st.session_state.review_idx += 1
                 st.rerun()
         with col_no:
             if st.button("いいえ"):
                 st.session_state.segment_enabled[idx] = False
+                st.session_state._sync_checkboxes = True
                 st.session_state.review_idx += 1
                 st.rerun()
         with col_skip:
