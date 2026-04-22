@@ -82,7 +82,7 @@ if 'state' not in st.session_state:
 
 # file uploader
 uploaded_file = st.file_uploader(
-    "動画をアップロード：", type=["mp4", "mov"], key="file_uploader"
+    "動画をアップロード：", type=["mp4", "mov", "webm"], key="file_uploader"
 )
 
 
@@ -94,8 +94,8 @@ if uploaded_file is not None and st.session_state.state == 1:
     st.status('動画を分析中...しばらくお待ちください。')
     tmpdirname = tempfile.mkdtemp()
     suffix = os.path.splitext(uploaded_file.name)[1]
-    if suffix.lower() not in [".mp4", ".mov"]:
-        st.error("対応している動画形式はMP4またはMOVのみです。")
+    if suffix.lower() not in [".mp4", ".mov", ".webm"]:
+        st.error("対応している動画形式はMP4、MOVまたはWebMのみです。")
         st.session_state.state = 1
         st.rerun()
     input_video_path = os.path.join(tmpdirname, f"input{suffix}")
