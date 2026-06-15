@@ -5,3 +5,9 @@
 __pycache__/
 .devcontainer/
 .DS_Store
+
+# PyInstaller ビルド成果物
+build/
+dist/
+.venv_build/
+ffmpeg/
