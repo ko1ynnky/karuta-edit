@@ -1,5 +1,10 @@
 import streamlit as st
 import numpy as np
+import importlib.util
+import shutil
+import soundfile as sf
+import subprocess
+import sys
 import tempfile
 import os
 from utils import return_top_scores
@@ -52,6 +57,60 @@ def estimate_duration(segments: list[tuple[float, float]]) -> float:
     return sum(end - start for start, end in segments)
 
 
+_TK_DIALOG_CODE = """
+import tkinter as tk
+from tkinter import filedialog
+root = tk.Tk()
+root.withdraw()
+root.attributes("-topmost", True)
+path = filedialog.askopenfilename(
+    title="動画ファイルを選択",
+    filetypes=[("動画", "*.mp4 *.mov *.webm *.mkv"), ("すべて", "*.*")],
+)
+print(path)
+"""
+
+
+def pick_video_file() -> str | None:
+    """サーバ側でOSネイティブのファイル選択ダイアログを開き、選択パスを返す。
+
+    ブラウザのセキュリティ制約上、ページ内のファイル選択UIからは
+    ローカルパスを取得できないため、同一マシンで動くこのプロセス側から開く。
+    Streamlitのスクリプトスレッドからtkinterを直接使うとmacOSで
+    クラッシュするため、いずれの方式もサブプロセスで実行する。
+    キャンセル時・ダイアログを開けない環境では None を返す。
+    """
+    if sys.platform == "darwin":
+        # macOSはtkinterが未導入のPython環境が多いため、標準のosascriptを使う
+        cmd = [
+            "osascript", "-e",
+            'POSIX path of (choose file with prompt "動画ファイルを選択")',
+        ]
+    elif importlib.util.find_spec("tkinter") is not None:
+        cmd = [sys.executable, "-c", _TK_DIALOG_CODE]
+    elif sys.platform == "win32":
+        cmd = [
+            "powershell", "-NoProfile", "-Command",
+            "Add-Type -AssemblyName System.Windows.Forms; "
+            "$d = New-Object System.Windows.Forms.OpenFileDialog; "
+            "$d.Filter = '動画|*.mp4;*.mov;*.webm;*.mkv|すべて|*.*'; "
+            "if ($d.ShowDialog() -eq 'OK') { $d.FileName }",
+        ]
+    else:
+        cmd = [
+            "zenity", "--file-selection", "--title=動画ファイルを選択",
+            "--file-filter=動画 | *.mp4 *.mov *.webm *.mkv",
+        ]
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True)
+    except FileNotFoundError:
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
 # ---------------------------------------------------------------------------
 # 共通 UI
 # ---------------------------------------------------------------------------
@@ -80,28 +139,75 @@ if 'state' not in st.session_state:
         if key != "state":
             del st.session_state[key]
 
+st.session_state.setdefault("uploader_gen", 0)
+
+SUPPORTED_EXTS = [".mp4", ".mov", ".webm", ".mkv"]
+
 # file uploader
+# key を世代管理し、コピー完了後に世代を進めることで
+# Streamlit がメモリ上に保持するアップロードデータを解放する
 uploaded_file = st.file_uploader(
-    "動画をアップロード：", type=["mp4", "mov", "webm"], key="file_uploader"
+    "動画をアップロード：",
+    type=[ext.lstrip(".") for ext in SUPPORTED_EXTS],
+    key=f"file_uploader_{st.session_state.uploader_gen}",
 )
+# ダイアログで選択したパスをwidget keyへ事前反映
+# (widget描画後のsession_state書き込みはエラーになるため)
+if "_picked_path" in st.session_state:
+    st.session_state["local_path_input"] = st.session_state.pop("_picked_path")
+
+col_path, col_pick = st.columns([4, 1], vertical_alignment="bottom")
+with col_path:
+    local_path_input = st.text_input(
+        "またはローカル動画ファイルのパスを指定：",
+        key="local_path_input",
+        placeholder="/path/to/video.mp4 （数GBの大きい動画はアップロードよりこちらが高速です）",
+    )
+with col_pick:
+    if st.button("ファイルを選択..."):
+        picked = pick_video_file()
+        if picked:
+            st.session_state._picked_path = picked
+            st.rerun()
 
 
 # ---------------------------------------------------------------------------
 # State 1: 分析
 # ---------------------------------------------------------------------------
 
-if uploaded_file is not None and st.session_state.state == 1:
-    st.status('動画を分析中...しばらくお待ちください。')
-    tmpdirname = tempfile.mkdtemp()
-    suffix = os.path.splitext(uploaded_file.name)[1]
-    if suffix.lower() not in [".mp4", ".mov", ".webm"]:
-        st.error("対応している動画形式はMP4、MOVまたはWebMのみです。")
-        st.session_state.state = 1
-        st.rerun()
-    input_video_path = os.path.join(tmpdirname, f"input{suffix}")
+if st.session_state.state == 1:
+    input_video_path = None
+    tmpdirname = None
 
-    with open(input_video_path, "wb") as f:
-        f.write(uploaded_file.getbuffer())
+    if uploaded_file is not None:
+        suffix = os.path.splitext(uploaded_file.name)[1]
+        if suffix.lower() not in SUPPORTED_EXTS:
+            st.error("対応している動画形式はMP4、MOV、WebMまたはMKVのみです。")
+            st.stop()
+        st.status('動画を保存中...しばらくお待ちください。')
+        tmpdirname = tempfile.mkdtemp()
+        input_video_path = os.path.join(tmpdirname, f"input{suffix}")
+        # getbuffer() は全量を一度にRAMへ複製するため、チャンクで書き出す
+        uploaded_file.seek(0)
+        with open(input_video_path, "wb") as f:
+            shutil.copyfileobj(uploaded_file, f, length=16 * 1024 * 1024)
+        st.session_state.uploader_gen += 1
+    else:
+        local_path = local_path_input.strip().strip("'\"")
+        if local_path:
+            local_path = os.path.expanduser(local_path)
+            if not os.path.isfile(local_path):
+                st.error("指定されたパスにファイルが見つかりません。")
+            elif os.path.splitext(local_path)[1].lower() not in SUPPORTED_EXTS:
+                st.error("対応している動画形式はMP4、MOV、WebMまたはMKVのみです。")
+            else:
+                # ローカルファイルはコピーせずそのまま使う (5GB級のコピーを回避)
+                input_video_path = local_path
+
+if st.session_state.state == 1 and input_video_path is not None:
+    st.status('動画を分析中...しばらくお待ちください。')
+    if tmpdirname is None:
+        tmpdirname = tempfile.mkdtemp()
 
     audio_path = os.path.join(tmpdirname, "audio.wav")
     extract_audio(input_video_path, audio_path)
@@ -116,6 +222,7 @@ if uploaded_file is not None and st.session_state.state == 1:
     st.session_state.update({
         "tmpdir": tmpdirname,
         "input_video": input_video_path,
+        "audio_path": audio_path,
         "waveform": waveform,
         "sorted_scores": sorted_scores,
         "segment_enabled": {idx: True for idx, _ in sorted_scores},
@@ -208,24 +315,6 @@ if st.session_state.state == 2:
         seg_start = max(0.1, center - before)
         seg_end = min(center + after, len(waveform) / 10.0 - 0.1)
 
-        # プレビュークリップ生成 (キャッシュあり)
-        cache_key = (idx, before, after)
-        if cache_key not in st.session_state.preview_clips:
-            with st.spinner("プレビュー生成中..."):
-                clip_dir = os.path.join(st.session_state.tmpdir, "previews")
-                os.makedirs(clip_dir, exist_ok=True)
-                clip_path = os.path.join(clip_dir, f"preview_{idx}.mp4")
-                extract_preview_clip(
-                    input_video=st.session_state.input_video,
-                    center_sec=center,
-                    before_sec=before,
-                    after_sec=after,
-                    output_path=clip_path,
-                )
-                st.session_state.preview_clips[cache_key] = clip_path
-
-        clip_path = st.session_state.preview_clips[cache_key]
-
         # 区間情報
         st.markdown(
             f"**#{review_idx + 1}** &nbsp; "
@@ -233,9 +322,42 @@ if st.session_state.state == 2:
             f"Score: {score / 100}"
         )
 
-        # プレーヤー
-        if clip_path and os.path.exists(clip_path):
-            st.video(clip_path, autoplay=True)
+        # 音声プレビュー: 抽出済みWAVをスライス再生する
+        # (巨大な元動画からの再エンコードを避け、即座に確認できる)
+        with sf.SoundFile(st.session_state.audio_path) as af:
+            sr = af.samplerate
+            start_frame = min(int(seg_start * sr), max(0, af.frames - 1))
+            n_frames = max(1, int((seg_end - seg_start) * sr))
+            af.seek(start_frame)
+            audio_clip = af.read(
+                min(n_frames, af.frames - start_frame), dtype="float32"
+            )
+        st.audio(audio_clip, sample_rate=sr, autoplay=True)
+
+        # 映像はオンデマンド生成 (キャッシュあり)
+        cache_key = (idx, before, after)
+        if st.session_state.get("video_preview_key") == cache_key:
+            if cache_key not in st.session_state.preview_clips:
+                with st.spinner("プレビュー生成中..."):
+                    clip_dir = os.path.join(st.session_state.tmpdir, "previews")
+                    os.makedirs(clip_dir, exist_ok=True)
+                    clip_path = os.path.join(clip_dir, f"preview_{idx}.mp4")
+                    extract_preview_clip(
+                        input_video=st.session_state.input_video,
+                        center_sec=center,
+                        before_sec=before,
+                        after_sec=after,
+                        output_path=clip_path,
+                    )
+                    st.session_state.preview_clips[cache_key] = clip_path
+
+            clip_path = st.session_state.preview_clips[cache_key]
+            if clip_path and os.path.exists(clip_path):
+                st.video(clip_path, autoplay=True)
+        else:
+            if st.button("映像で確認"):
+                st.session_state.video_preview_key = cache_key
+                st.rerun()
 
         # 操作ボタン
         col_back, col_yes, col_no, col_skip = st.columns(4)
