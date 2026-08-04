@@ -331,20 +331,31 @@ def extract_audio(input_video: str, output_audio: str):
 
 
 def simplify_waveform(input_path: str, output_path: str):
-    waveform, sample_rate = sf.read(input_path)
-    # モノラル化
-    if len(waveform.shape) > 1:
-        waveform = waveform.mean(axis=1)
+    # 長時間動画のWAVを丸ごとメモリに載せないよう、ブロック単位で処理する。
+    # blocksizeをframe_sizeの倍数にすることでブロック境界が0.1秒フレームに
+    # 揃い、一括読み込み版と同一の結果になる (末尾の端数フレーム切り捨ても同じ)。
+    with sf.SoundFile(input_path) as f:
+        sample_rate = f.samplerate
+        frame_size = sample_rate // 10
+        block_size = frame_size * 600  # 60秒ぶん
+        frame_maxima = []
+        for block in f.blocks(
+            blocksize=block_size, dtype="float64", always_2d=True
+        ):
+            # モノラル化
+            block = np.abs(block.mean(axis=1))
+            num_frames = len(block) // frame_size
+            if num_frames == 0:
+                break
+            frame_maxima.append(
+                block[:num_frames * frame_size]
+                .reshape(num_frames, frame_size)
+                .max(axis=1)
+            )
 
-    waveform = np.abs(waveform)
-    
-    frame_size = sample_rate // 10
-    num_frames = len(waveform) // frame_size
-    waveform = waveform[:num_frames * frame_size]
-    waveform = waveform.reshape(num_frames, frame_size)
-    waveform = np.max(waveform, axis=1)
-
-    waveform = waveform.copy()
+    waveform = (
+        np.concatenate(frame_maxima) if frame_maxima else np.empty(0)
+    )
     np.save(output_path, waveform)
     print(f"Saved simplified waveform to {output_path}")
 
