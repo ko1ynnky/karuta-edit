@@ -10,4 +10,5 @@ __pycache__/
 build/
 dist/
 .venv_build/
+.venv_mac_build/
 ffmpeg/
