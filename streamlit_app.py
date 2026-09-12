@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import numpy as np
 import importlib.util
 import shutil
@@ -55,6 +56,67 @@ def compute_segments(
 def estimate_duration(segments: list[tuple[float, float]]) -> float:
     """セグメント合計秒数を計算する。"""
     return sum(end - start for start, end in segments)
+
+
+_AUTO_ADVANCE_SCRIPT = """
+<script>
+(function () {
+  const doc = window.parent.document;
+  const enabled = __ENABLED__;
+  const marker = "__MARKER__";
+  const nextLabel = "__NEXT_LABEL__";
+
+  // 停止指示は発火時に読み直す。iframe が作り直されても
+  // 親要素に残ったリスナーが古い設定のまま動くのを防ぐため。
+  doc.documentElement.dataset.karutaAutoAdvance = enabled ? "on" : "off";
+  if (!enabled) return;
+
+  function advance() {
+    if (doc.documentElement.dataset.karutaAutoAdvance !== "on") return;
+    const btn = Array.from(doc.querySelectorAll("button")).find(
+      (b) => b.innerText.trim() === nextLabel
+    );
+    if (btn) btn.click();
+  }
+
+  function bind() {
+    const media = doc.querySelector("video") || doc.querySelector("audio");
+    if (!media) return false;
+    if (media.dataset.karutaAdvanceMarker === marker) return true;
+    media.dataset.karutaAdvanceMarker = marker;
+    media.addEventListener("ended", advance, { once: true });
+    return true;
+  }
+
+  // Streamlit はメディア要素を段階的に描画するため、現れるまで待つ
+  if (!bind()) {
+    let tries = 0;
+    const timer = setInterval(function () {
+      if (bind() || ++tries > 50) clearInterval(timer);
+    }, 100);
+  }
+})();
+</script>
+"""
+
+NEXT_BUTTON_LABEL = "スキップ →"
+
+
+def render_auto_advance(enabled: bool, marker: str) -> None:
+    """再生終了で次の候補へ進むスクリプトを親ドキュメントへ仕込む。
+
+    Streamlit は再生終了を Python 側へ通知しないため、親ドキュメントの
+    <video>/<audio> の ended を直接購読する。区間長ぶん time.sleep して
+    rerun する方式は採らない。待機中はボタンが押せず、その候補に対する
+    はい/いいえの判定ができなくなるため。
+    """
+    html = (
+        _AUTO_ADVANCE_SCRIPT
+        .replace("__ENABLED__", "true" if enabled else "false")
+        .replace("__MARKER__", marker)
+        .replace("__NEXT_LABEL__", NEXT_BUTTON_LABEL)
+    )
+    components.html(html, height=0)
 
 
 _TK_DIALOG_CODE = """
@@ -322,6 +384,12 @@ if st.session_state.state == 2:
             f"Score: {score / 100}"
         )
 
+        auto_advance = st.checkbox(
+            "自動で次の候補を再生する",
+            value=True,
+            key="auto_advance",
+        )
+
         # 音声プレビュー: 抽出済みWAVをスライス再生する
         # (巨大な元動画からの再エンコードを避け、即座に確認できる)
         with sf.SoundFile(st.session_state.audio_path) as af:
@@ -359,6 +427,8 @@ if st.session_state.state == 2:
                 st.session_state.video_preview_key = cache_key
                 st.rerun()
 
+        render_auto_advance(auto_advance, f"{review_idx}")
+
         # 操作ボタン
         col_back, col_yes, col_no, col_skip = st.columns(4)
         with col_back:
@@ -378,7 +448,7 @@ if st.session_state.state == 2:
                 st.session_state.review_idx += 1
                 st.rerun()
         with col_skip:
-            if st.button("スキップ →"):
+            if st.button(NEXT_BUTTON_LABEL):
                 st.session_state.review_idx += 1
                 st.rerun()
     else:
