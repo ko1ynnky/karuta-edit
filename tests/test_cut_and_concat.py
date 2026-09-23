@@ -36,7 +36,13 @@ TOLERANCE_SEC = 0.25 / FPS
 ENCODER_MODES = ["libx264"] + (["videotoolbox_h264"] if sys.platform == "darwin" else [])
 
 
-def _make_source(path):
+H264 = ["-c:v", "libx264", "-g", "60", "-pix_fmt", "yuv420p"]
+# iPhone の撮影と同じ HEVC Main10
+HEVC_10BIT = ["-c:v", "libx265", "-x265-params", "log-level=error:keyint=60",
+              "-pix_fmt", "yuv420p10le", "-tag:v", "hvc1"]
+
+
+def _make_source(path, video_codec=H264):
     video = (
         f"color=c=black:s=320x180:r=60000/1001:d=24,"
         f"drawbox=x=0:y=0:w=iw:h=ih:color=white:t=fill:"
@@ -46,8 +52,7 @@ def _make_source(path):
     audio = f"aevalsrc=exprs='{beep}|{beep}':s={SR}:d=24"
     subprocess.run(
         ["ffmpeg", "-v", "error", "-f", "lavfi", "-i", video, "-f", "lavfi", "-i", audio,
-         "-c:v", "libx264", "-g", "60", "-pix_fmt", "yuv420p",
-         "-c:a", "aac", "-b:a", "192k", "-y", str(path)],
+         *video_codec, "-c:a", "aac", "-b:a", "192k", "-y", str(path)],
         check=True,
     )
 
@@ -139,3 +144,22 @@ def test_each_segment_keeps_the_frames_inside_its_range(source, shortened):
     )
     _, frame_times = _flash_times(shortened)
     assert len(frame_times) == expected
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="VideoToolbox は macOS のみ")
+@pytest.mark.parametrize("video_codec", [H264, HEVC_10BIT], ids=["h264", "hevc_10bit"])
+def test_hardware_decoding_is_used_without_falling_back_to_software(tmp_path, video_codec):
+    source = tmp_path / "source.mov"
+    _make_source(source, video_codec)
+    stages = []
+    cut_and_concat_mp4(
+        input_video=str(source),
+        segments=SEGMENTS,
+        output_video=str(tmp_path / "short.mp4"),
+        encoder_mode="videotoolbox_h264",
+        prefer_hw_decode=True,
+        timing_callback=lambda stage, elapsed, meta: stages.append((stage, meta)),
+    )
+    attempts = [meta for stage, meta in stages if stage == "prepare_segments"]
+    assert [m["use_hw_decode"] for m in attempts] == [True]
+    assert not any(stage.startswith("fallback") for stage, _ in stages)
