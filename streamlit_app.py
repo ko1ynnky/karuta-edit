@@ -1,5 +1,4 @@
 import streamlit as st
-import streamlit.components.v1 as components
 import numpy as np
 import importlib.util
 import shutil
@@ -8,18 +7,33 @@ import subprocess
 import sys
 import tempfile
 import os
+import time
+from card_strip import card_strip, neighbor, queue_steps, review_queue, strip_items
+from page_parts import (
+    FLOW_HTML,
+    apply_page_style,
+    auto_advance,
+    cover_leftovers,
+    duration_jp,
+    export_progress_text,
+    leave_guard,
+    needs_leave_guard,
+    step_html,
+    stepper_html,
+)
 from poem_id import (
     MODEL_DOWNLOAD_MB,
     Recognizer,
-    describe_reading,
     ensure_model,
     identify_readings,
     resample_for_recognition,
-    short_label,
+    review_text,
 )
 from reader_voice import compute_voiced_frames
 from utils import return_candidates
 from offline_app import (
+    get_chapter_titles,
+    get_media_duration_sec,
     extract_audio,
     simplify_waveform,
     cut_and_concat_mp4,
@@ -69,65 +83,7 @@ def estimate_duration(segments: list[tuple[float, float]]) -> float:
     return sum(end - start for start, end in segments)
 
 
-_AUTO_ADVANCE_SCRIPT = """
-<script>
-(function () {
-  const doc = window.parent.document;
-  const enabled = __ENABLED__;
-  const marker = "__MARKER__";
-  const nextLabel = "__NEXT_LABEL__";
-
-  // 停止指示は発火時に読み直す。iframe が作り直されても
-  // 親要素に残ったリスナーが古い設定のまま動くのを防ぐため。
-  doc.documentElement.dataset.karutaAutoAdvance = enabled ? "on" : "off";
-  if (!enabled) return;
-
-  function advance() {
-    if (doc.documentElement.dataset.karutaAutoAdvance !== "on") return;
-    const btn = Array.from(doc.querySelectorAll("button")).find(
-      (b) => b.innerText.trim() === nextLabel
-    );
-    if (btn) btn.click();
-  }
-
-  function bind() {
-    const media = doc.querySelector("video") || doc.querySelector("audio");
-    if (!media) return false;
-    if (media.dataset.karutaAdvanceMarker === marker) return true;
-    media.dataset.karutaAdvanceMarker = marker;
-    media.addEventListener("ended", advance, { once: true });
-    return true;
-  }
-
-  // Streamlit はメディア要素を段階的に描画するため、現れるまで待つ
-  if (!bind()) {
-    let tries = 0;
-    const timer = setInterval(function () {
-      if (bind() || ++tries > 50) clearInterval(timer);
-    }, 100);
-  }
-})();
-</script>
-"""
-
-NEXT_BUTTON_LABEL = "スキップ →"
-
-
-def render_auto_advance(enabled: bool, marker: str) -> None:
-    """再生終了で次の候補へ進むスクリプトを親ドキュメントへ仕込む。
-
-    Streamlit は再生終了を Python 側へ通知しないため、親ドキュメントの
-    <video>/<audio> の ended を直接購読する。区間長ぶん time.sleep して
-    rerun する方式は採らない。待機中はボタンが押せず、その候補に対する
-    はい/いいえの判定ができなくなるため。
-    """
-    html = (
-        _AUTO_ADVANCE_SCRIPT
-        .replace("__ENABLED__", "true" if enabled else "false")
-        .replace("__MARKER__", marker)
-        .replace("__NEXT_LABEL__", NEXT_BUTTON_LABEL)
-    )
-    components.html(html, height=0)
+NEXT_BUTTON_LABEL = "次の件"
 
 
 _TK_DIALOG_CODE = """
@@ -161,8 +117,11 @@ def identify_candidate_poems(
             shown["pct"] = pct
             bar.progress(pct / 100, text=f"音声認識のモデルをダウンロード中... {done >> 20}/{total >> 20} MB")
 
+    started = time.monotonic()
+
     def on_identify(done: int, total: int) -> None:
-        bar.progress(done / total, text=f"読まれた歌を特定中... {done}/{total}")
+        remaining = (time.monotonic() - started) / done * (total - done)
+        bar.progress(done / total, text=f"{done} / {total}　残り約{int(remaining) + 1}秒")
 
     try:
         model_dir = ensure_model(progress=on_download)
@@ -217,26 +176,8 @@ def pick_video_file() -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# 共通 UI
+# 状態の初期化
 # ---------------------------------------------------------------------------
-
-url = "https://docs.google.com/presentation/d/1gG8EdmBDSkv82v8wLjVtbLoWbaBhAx5MWzBW1FoKmxg/edit?usp=sharing"
-st.write(f'[使い方・仕組み]({url})')
-
-slider_values = st.slider('区間を指定：', -10.0, 10.0, (-1.5, 3.0), step=0.5)
-if slider_values[0] >= 0:
-    st.warning('下限は負の値にしてください。')
-if slider_values[1] <= 0:
-    st.warning('上限は正の値にしてください。')
-if slider_values[0] == slider_values[1]:
-    st.snow()
-if slider_values[0] == 0.0 and slider_values[1] == 0.0:
-    st.balloons()
-if slider_values[0] < 0 and slider_values[1] > 0:
-    st.success(
-        f'上の句の開始時点の{-slider_values[0]}秒前から、'
-        f'下の句の終了時点の{slider_values[1]}秒後までを残します。'
-    )
 
 if 'state' not in st.session_state:
     st.session_state.state = 1
@@ -246,348 +187,424 @@ if 'state' not in st.session_state:
 
 st.session_state.setdefault("uploader_gen", 0)
 
+apply_page_style()
+leave_guard(needs_leave_guard(
+    st.session_state.state, st.session_state.get("saved", False), analyzing="pending" in st.session_state,
+))
+
 SUPPORTED_EXTS = [".mp4", ".mov", ".webm", ".mkv"]
 
-# 既定オフ: 読手の声の検出は空調などの雑音に強いが、読手が遠い・声が混ざるといった
-# 録音では声が取れず候補を落とし得る。静かな会場では従来の音量パターンで十分なので、
-# 雑音で誤候補が多いときだけ使う選択式にしている。
-# (session_state の初期化より後に置かないと、初回実行でウィジェットのキーが消される)
-use_reader_voice = st.checkbox(
-    "読手の声で候補を絞る（雑音の多い動画向け）",
-    value=False,
-    key="use_reader_voice",
-    disabled=st.session_state.state != 1,
-    help=(
-        "空調などの雑音が大きく、取りではない場面（札を払う音・札を並べる音だけの区間）が"
-        "候補に多く混ざるときにオンにしてください。\n\n"
-        "オンにすると、音声から読手の声を検出し、下の句の後に上の句が読み始められた位置だけを"
-        "候補にします。雑音に埋もれて見逃していた読み始めも拾えるようになります。\n\n"
-        "読手の声が小さく録れている動画では、かえって本物の取りを落とすことがあります。"
-        "静かな会場で撮った動画ではオフ（音量パターンのみで検出）のままで十分です。"
-    ),
-)
-
-# 既定オン: 歌が分かれば、特定できなかった候補だけを確かめれば済む (レビューの手間が大きく減る)
-identify_poems = st.checkbox(
-    "読まれた歌を特定する",
-    value=True,
-    key="identify_poems",
-    disabled=st.session_state.state != 1,
-    help=(
-        "候補ごとに、読手の読みを音声認識で書き起こし、百人一首のどの歌の上の句・下の句かを"
-        "レビュー画面に表示します。下の句の読み始めに付いた候補（取りの場面ではない候補）も分かります。\n\n"
-        f"初回だけ、音声認識のモデル（約{MODEL_DOWNLOAD_MB}MB）をダウンロードします。"
-        "音声はこのPCの中だけで処理し、外部には送りません。"
-        "1試合で1〜2分ほどかかります（PCの性能によってはそれ以上）。"
-    ),
-)
-
-
-# file uploader
-# key を世代管理し、コピー完了後に世代を進めることで
-# Streamlit がメモリ上に保持するアップロードデータを解放する
-uploaded_file = st.file_uploader(
-    "動画をアップロード：",
-    type=[ext.lstrip(".") for ext in SUPPORTED_EXTS],
-    key=f"file_uploader_{st.session_state.uploader_gen}",
-)
-# ダイアログで選択したパスをwidget keyへ事前反映
-# (widget描画後のsession_state書き込みはエラーになるため)
-if "_picked_path" in st.session_state:
-    st.session_state["local_path_input"] = st.session_state.pop("_picked_path")
-
-col_path, col_pick = st.columns([4, 1], vertical_alignment="bottom")
-with col_path:
-    local_path_input = st.text_input(
-        "またはローカル動画ファイルのパスを指定：",
-        key="local_path_input",
-        placeholder="/path/to/video.mp4 （数GBの大きい動画はアップロードよりこちらが高速です）",
-    )
-with col_pick:
-    if st.button("ファイルを選択..."):
-        picked = pick_video_file()
-        if picked:
-            st.session_state._picked_path = picked
-            st.rerun()
-
 
 # ---------------------------------------------------------------------------
-# State 1: 分析
+# State 1: 動画を選ぶ・解析
 # ---------------------------------------------------------------------------
 
-if st.session_state.state == 1:
-    input_video_path = None
-    source_name = None
-    tmpdirname = None
+def _duration_text(sec: float | None) -> str:
+    if not sec:
+        return "不明"
+    sec = int(round(sec))
+    h, rest = divmod(sec, 3600)
+    return f"{h}:{rest // 60:02d}:{rest % 60:02d}" if h else f"{rest // 60:02d}:{rest % 60:02d}"
 
-    if uploaded_file is not None:
-        source_name = uploaded_file.name
-        suffix = os.path.splitext(uploaded_file.name)[1]
-        if suffix.lower() not in SUPPORTED_EXTS:
-            st.error("対応している動画形式はMP4、MOV、WebMまたはMKVのみです。")
-            st.stop()
-        st.status('動画を保存中...しばらくお待ちください。')
-        tmpdirname = tempfile.mkdtemp()
-        input_video_path = os.path.join(tmpdirname, f"input{suffix}")
-        # getbuffer() は全量を一度にRAMへ複製するため、チャンクで書き出す
-        uploaded_file.seek(0)
-        with open(input_video_path, "wb") as f:
-            shutil.copyfileobj(uploaded_file, f, length=16 * 1024 * 1024)
-        st.session_state.uploader_gen += 1
+
+def _size_text(size: int) -> str:
+    return f"{size / 1e9:.1f} GB" if size >= 1e9 else f"{size / 1e6:.0f} MB"
+
+
+def _describe_video(path: str, name: str, tmpdir: str | None = None) -> dict:
+    try:
+        duration = get_media_duration_sec(path)
+    except Exception:  # 壊れたファイルなど。長さは表示の補助なので、分からなくても先へ進める
+        duration = None
+    return {"path": path, "name": name, "tmpdir": tmpdir, "duration": duration, "size": os.path.getsize(path)}
+
+
+def _choose_path() -> None:
+    ss = st.session_state
+    ss.pop("choose_error", None)
+    raw = ss.get("local_path_input", "").strip().strip("'\"")
+    if not raw:
+        return
+    path = os.path.expanduser(raw)
+    if not os.path.isfile(path):
+        ss.choose_error = "指定されたパスにファイルが見つかりません。"
+    elif os.path.splitext(path)[1].lower() not in SUPPORTED_EXTS:
+        ss.choose_error = "対応している動画形式は MP4・MOV・WebM・MKV です。"
     else:
-        local_path = local_path_input.strip().strip("'\"")
-        if local_path:
-            local_path = os.path.expanduser(local_path)
-            if not os.path.isfile(local_path):
-                st.error("指定されたパスにファイルが見つかりません。")
-            elif os.path.splitext(local_path)[1].lower() not in SUPPORTED_EXTS:
-                st.error("対応している動画形式はMP4、MOV、WebMまたはMKVのみです。")
-            else:
-                # ローカルファイルはコピーせずそのまま使う (5GB級のコピーを回避)
-                input_video_path = local_path
-                source_name = os.path.basename(local_path)
+        # ローカルファイルはコピーせずそのまま使う (5GB級のコピーを回避)
+        ss.chosen = _describe_video(path, os.path.basename(path))
 
-if st.session_state.state == 1 and input_video_path is not None:
-    st.status('動画を分析中...しばらくお待ちください。')
-    if tmpdirname is None:
-        tmpdirname = tempfile.mkdtemp()
 
+def _pick_file() -> None:
+    picked = pick_video_file()
+    if picked:
+        st.session_state.local_path_input = picked
+        _choose_path()
+
+
+def _choose_another() -> None:
+    st.session_state.pop("chosen", None)
+    st.session_state.local_path_input = ""
+
+
+def _start_analysis() -> None:
+    ss = st.session_state
+    lo, hi = ss.clip_slider
+    ss.pending = {
+        **ss.chosen,
+        # 区間の指定欄は確認・書き出しの画面に出さないので、値をここで残しておく
+        "clip_range": (abs(lo), abs(hi)),
+        "use_reader_voice": ss.use_reader_voice,
+        "identify_poems": ss.identify_poems,
+    }
+
+
+if st.session_state.state == 1 and "pending" not in st.session_state:
+    ss = st.session_state
+    st.html(stepper_html(1))
+    col_main, col_flow = st.columns([1.7, 1], gap="large")
+    with col_main:
+        st.markdown("## 試合の動画を選んでください")
+        st.write(
+            "読みと取りの場面だけを残した短縮版を作ります。読まれた歌を自動で聞き分けるので、"
+            "確かめるのは聞き分けられなかった場面だけです。"
+        )
+        chosen = ss.get("chosen")
+        if chosen:
+            with st.container(border=True):
+                col_file, col_change = st.columns([4, 1.3], vertical_alignment="center")
+                col_file.markdown(f"**{chosen['name']}**")
+                col_file.markdown(f"長さ {_duration_text(chosen['duration'])}　大きさ {_size_text(chosen['size'])}")
+                col_change.button("別の動画を選ぶ", on_click=_choose_another, width="stretch")
+        else:
+            col_path, col_pick = st.columns([4, 1.3], vertical_alignment="bottom")
+            col_path.text_input(
+                "動画ファイルの場所",
+                key="local_path_input",
+                placeholder="/Users/…/試合.MOV（パスを貼り付けて Enter）",
+                on_change=_choose_path,
+            )
+            col_pick.button("ファイルを選択...", on_click=_pick_file, width="stretch")
+            if ss.get("choose_error"):
+                st.error(ss.choose_error)
+            # key を世代管理し、コピー完了後に世代を進めることで
+            # Streamlit がメモリ上に保持するアップロードデータを解放する
+            uploaded_file = st.file_uploader(
+                "またはアップロード（ほかの端末から開いているとき）",
+                type=[ext.lstrip(".") for ext in SUPPORTED_EXTS],
+                key=f"file_uploader_{ss.uploader_gen}",
+            )
+            if uploaded_file is not None:
+                with st.spinner("動画を保存しています..."):
+                    tmpdirname = tempfile.mkdtemp()
+                    suffix = os.path.splitext(uploaded_file.name)[1]
+                    copy_path = os.path.join(tmpdirname, f"input{suffix}")
+                    # getbuffer() は全量を一度にRAMへ複製するため、チャンクで書き出す
+                    uploaded_file.seek(0)
+                    with open(copy_path, "wb") as f:
+                        shutil.copyfileobj(uploaded_file, f, length=16 * 1024 * 1024)
+                ss.chosen = _describe_video(copy_path, uploaded_file.name, tmpdirname)
+                ss.uploader_gen += 1
+                st.rerun()
+
+        lo, hi = ss.get("clip_slider", (-1.5, 3.0))
+        identify_on = ss.get("identify_poems", True)
+        st.caption(
+            f"上の句の{-lo}秒前から下の句の{hi}秒後までを残します。"
+            f"読まれた歌の聞き分けは{'オン' if identify_on else 'オフ'}です。"
+        )
+        with st.expander("詳細設定"):
+            slider_values = st.slider(
+                "残す範囲（上の句の開始から何秒前、下の句の終了から何秒後）",
+                -10.0, 10.0, (-1.5, 3.0), step=0.5, key="clip_slider",
+            )
+            if slider_values[0] >= 0:
+                st.warning('下限は負の値にしてください。')
+            if slider_values[1] <= 0:
+                st.warning('上限は正の値にしてください。')
+            if slider_values[0] == slider_values[1]:
+                st.snow()
+            if slider_values[0] == 0.0 and slider_values[1] == 0.0:
+                st.balloons()
+
+            # 既定オン: 歌が分かれば、特定できなかった候補だけを確かめれば済む (レビューの手間が大きく減る)
+            st.checkbox(
+                "読まれた歌を特定する",
+                value=True,
+                key="identify_poems",
+                help=(
+                    "候補ごとに、読手の読みを音声認識で書き起こし、百人一首のどの歌の上の句・下の句かを"
+                    "確認画面に表示します。下の句の読み始めに付いた候補（取りの場面ではない候補）も分かります。\n\n"
+                    f"初回だけ、音声認識のモデル（約{MODEL_DOWNLOAD_MB}MB）をダウンロードします。"
+                    "音声はこのPCの中だけで処理し、外部には送りません。"
+                    "1試合で1〜2分ほどかかります（PCの性能によってはそれ以上）。"
+                ),
+            )
+            # 既定オフ: 読手の声の検出は空調などの雑音に強いが、読手が遠い・声が混ざるといった
+            # 録音では声が取れず候補を落とし得る。静かな会場では従来の音量パターンで十分なので、
+            # 雑音で誤候補が多いときだけ使う選択式にしている。
+            # (session_state の初期化より後に置かないと、初回実行でウィジェットのキーが消される)
+            st.checkbox(
+                "読手の声で候補を絞る（雑音の多い動画向け）",
+                value=False,
+                key="use_reader_voice",
+                help=(
+                    "空調などの雑音が大きく、取りではない場面（札を払う音・札を並べる音だけの区間）が"
+                    "候補に多く混ざるときにオンにしてください。\n\n"
+                    "オンにすると、音声から読手の声を検出し、下の句の後に上の句が読み始められた位置だけを"
+                    "候補にします。雑音に埋もれて見逃していた読み始めも拾えるようになります。\n\n"
+                    "読手の声が小さく録れている動画では、かえって本物の取りを落とすことがあります。"
+                    "静かな会場で撮った動画ではオフ（音量パターンのみで検出）のままで十分です。"
+                ),
+            )
+
+        # 以前はパスを入れて Enter を押した時点で解析が始まり、始め方が分かりにくかった
+        # (2026-09-23 の通しの操作で確認)。動画を選んでから、このボタンで始める。
+        st.button("解析を始める", type="primary", disabled=not chosen, on_click=_start_analysis)
+        url = "https://docs.google.com/presentation/d/1gG8EdmBDSkv82v8wLjVtbLoWbaBhAx5MWzBW1FoKmxg/edit?usp=sharing"
+        st.markdown(f"[使い方・仕組み]({url})")
+    with col_flow:
+        st.html(FLOW_HTML)
+
+
+if st.session_state.state == 1 and "pending" in st.session_state:
+    ss = st.session_state
+    job = ss.pending
+    st.html(stepper_html(2))
+    st.markdown("## 解析しています")
+    st.caption(job["name"])
+    rows = [st.empty() for _ in range(3 if job["identify_poems"] else 2)]
+    rows[0].html(step_html("run", "音声を取り出す"))
+    rows[1].html(step_html("todo", "読みの候補を探す"))
+    if job["identify_poems"]:
+        rows[2].html(step_html("todo", "読まれた歌を聞き分ける"))
+
+    tmpdirname = job["tmpdir"] or tempfile.mkdtemp()
     audio_path = os.path.join(tmpdirname, "audio.wav")
-    extract_audio(input_video_path, audio_path)
-
+    extract_audio(job["path"], audio_path)
     simplified_waveform_path = os.path.join(tmpdirname, "simplified.npy")
     simplify_waveform(audio_path, simplified_waveform_path)
+    rows[0].html(step_html("done", "音声を取り出す", "完了"))
 
+    rows[1].html(step_html("run", "読みの候補を探す"))
     waveform = np.load(simplified_waveform_path)
-    voiced = compute_voiced_frames(audio_path) if use_reader_voice else None
+    voiced = compute_voiced_frames(audio_path) if job["use_reader_voice"] else None
     score_dict = return_candidates(waveform, voiced)
     sorted_scores = sorted(score_dict.items(), key=lambda x: x[0])
-    readings = (
-        identify_candidate_poems(audio_path, tmpdirname, sorted_scores) if identify_poems else {}
-    )
+    rows[1].html(step_html("done", "読みの候補を探す", f"{len(sorted_scores)}件見つかりました"))
 
-    st.session_state.update({
+    readings = {}
+    if job["identify_poems"]:
+        with rows[2].container():
+            st.html(step_html("run", "読まれた歌を聞き分ける"))
+            readings = identify_candidate_poems(audio_path, tmpdirname, sorted_scores)
+
+    del ss.pending
+    ss.update({
         "tmpdir": tmpdirname,
-        "input_video": input_video_path,
-        "source_name": source_name,
+        "input_video": job["path"],
+        "source_name": job["name"],
+        "source_duration": job["duration"],
         "audio_path": audio_path,
         "waveform": waveform,
         "sorted_scores": sorted_scores,
         "segment_enabled": {idx: True for idx, _ in sorted_scores},
         "preview_clips": {},
-        "review_idx": 0,
         "readings": readings,
+        "reviewed": set(),
+        "clip_range": job["clip_range"],
         "state": 2,
     })
     st.rerun()
 
 
 # ---------------------------------------------------------------------------
-# State 2: 順次レビュー
+# State 2: 確認
 # ---------------------------------------------------------------------------
 
-if st.session_state.state == 2:
-    sorted_scores = st.session_state.sorted_scores
-    before = abs(slider_values[0])
-    after = abs(slider_values[1])
-    waveform = st.session_state.waveform
-    total_count = len(sorted_scores)
-    review_idx = st.session_state.review_idx
-    readings = st.session_state.readings
+_QUEUE_STYLE = {
+    "off": ("border: 1.5px dashed #8E8A6C; background: #F2F3EE; color: #4E4C3B;", "外した", "#595F55"),
+    "kept": ("border: 2px solid #213A2F; background: #2A4436; color: #F2F3EE;", "残した", "#595F55"),
+    "now": ("border: 2px solid #B8321F; outline: 2px solid #1F231E; outline-offset: 2px;"
+            " background: #2A4436; color: #F2F3EE;", "確認中", "#1F231E"),
+    "todo": ("border: 2px solid #B8321F; background: #2A4436; color: #F2F3EE;", "", "#595F55"),
+}
 
-    # ボタン起因の変更をチェックボックスwidget keyに事前反映
-    # (widget描画前でないとsession_stateへの書き込みがエラーになるため)
-    if st.session_state.get("_sync_checkboxes"):
-        for s_idx in st.session_state.segment_enabled:
-            st.session_state[f"sb_cb_{s_idx}"] = st.session_state.segment_enabled[s_idx]
-        del st.session_state._sync_checkboxes
 
-    # 有効セットと推定時間
-    enabled_set = {
-        idx for idx, v in st.session_state.segment_enabled.items() if v
-    }
-    enabled_count = len(enabled_set)
-
-    segments = compute_segments(
-        sorted_scores, enabled_set, before, after, len(waveform)
+def queue_html(steps: list[dict]) -> str:
+    """「確かめる順番」を、確認の順番の札 (1〜N) と状態で並べた HTML。"""
+    cells = []
+    for step in steps:
+        box, note, color = _QUEUE_STYLE[step["state"]]
+        weight = "700" if step["state"] == "now" else "400"
+        cells.append(
+            f'<li style="display:flex;flex-direction:column;align-items:center;gap:4px;">'
+            f'<span style="width:30px;height:42px;box-sizing:border-box;border-radius:2px;{box}'
+            f'display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;">'
+            f'{step["order"]}</span>'
+            f'<span style="font-size:11px;color:{color};font-weight:{weight};">#{step["n"]} {note}</span></li>'
+        )
+    return (
+        '<div style="font-size:13px;font-weight:700;color:#3E443B;margin-bottom:8px;">確かめる順番</div>'
+        '<ol aria-label="確かめる順番" style="margin:0;padding:0;list-style:none;display:flex;'
+        'flex-wrap:wrap;gap:10px 14px;font-variant-numeric:tabular-nums;">' + "".join(cells) + "</ol>"
     )
+
+
+if st.session_state.state == 2:
+    ss = st.session_state
+    sorted_scores = ss.sorted_scores
+    before, after = ss.clip_range
+    waveform = ss.waveform
+    readings = ss.readings
+    total_count = len(sorted_scores)
+    queue = review_queue(sorted_scores, readings)
+    ss.setdefault("review_idx", queue[0] if queue else total_count)
+    review_idx = ss.review_idx
+    st.html(stepper_html(3))
+
+    def move(step: int) -> None:
+        target = neighbor(queue, ss.review_idx, step)
+        if target is not None:
+            ss.review_idx = target
+        elif step > 0:
+            ss.review_idx = total_count  # 最後の札より先へ進んだら、確かめ終わりの表示にする
+
+    def decide(keep: bool) -> None:
+        idx = sorted_scores[ss.review_idx][0]
+        ss.segment_enabled[idx] = keep
+        ss.reviewed.add(idx)
+        move(+1)
+
+    def jump() -> None:
+        position = ss.card_strip.jump
+        if position is not None:
+            ss.review_idx = position
+
+    enabled_set = {idx for idx, v in ss.segment_enabled.items() if v}
+    enabled_count = len(enabled_set)
+    segments = compute_segments(sorted_scores, enabled_set, before, after, len(waveform))
     est_sec = estimate_duration(segments)
     est_min = int(est_sec) // 60
     est_sec_remainder = est_sec - est_min * 60
 
-    # --- サイドバー: メトリクス・一括操作・全シーン一覧 ---
-    with st.sidebar:
-        st.metric("選択区間", f"{enabled_count}/{total_count}")
-        st.metric("推定出力", f"{est_min}分{est_sec_remainder:.0f}秒")
-
-        col_all, col_none = st.columns(2)
-        with col_all:
-            if st.button("全選択"):
-                for key in st.session_state.segment_enabled:
-                    st.session_state.segment_enabled[key] = True
-                st.session_state._sync_checkboxes = True
-                st.rerun()
-        with col_none:
-            if st.button("全解除"):
-                for key in st.session_state.segment_enabled:
-                    st.session_state.segment_enabled[key] = False
-                st.session_state._sync_checkboxes = True
-                st.rerun()
-
-        # 歌を特定できた候補は取りの場面とみてよいことが多いので、既定で確かめる候補を絞る
-        unidentified = [
-            i for i, (s_idx, _) in enumerate(sorted_scores)
-            if s_idx in readings and readings[s_idx].poem is None
-        ]
-        only_unidentified = bool(readings) and st.checkbox(
-            f"歌を特定できなかった候補だけ表示（{len(unidentified)}件）",
-            value=True,
-            key="only_unidentified",
-            help="下の句の読み始めに付いた候補（取りの場面ではない可能性があるもの）も含みます。"
-                 "オンの間は「はい」「いいえ」「スキップ」「戻る」もこの候補の間で移動します。",
+    if not readings:
+        # 全候補を通しで確かめる前提の言い方にしない。実際には、誤検知が少し混ざるのを承知で
+        # そのまま短縮版を作ることが多い (ユーザーの指摘)
+        st.markdown(f"## 読みの候補が{total_count}件見つかりました")
+        st.caption("確かめなくても、そのまま短縮版を作れます。気になる場面があれば、札を押して再生し、外してください。")
+    elif queue:
+        st.markdown(f"## {len(queue)}件を確かめてください")
+        st.caption(
+            f"{total_count}件のうち{total_count - len(queue)}件は、読まれた歌が分かりました。"
+            "裏向きの札を、左から順に確かめます。"
         )
-        visible = unidentified if only_unidentified else list(range(total_count))
-        if review_idx < total_count and review_idx not in visible:
-            review_idx = next((i for i in visible if i > review_idx), total_count)
-            st.session_state.review_idx = review_idx
+    else:
+        st.markdown("## すべての候補の歌が分かりました")
 
-        def scene_row(i: int) -> None:
-            s_idx, s_score = sorted_scores[i]
-            s_center = s_idx / 10.0
-            s_start = max(0.1, s_center - before)
-            col_cb, col_btn = st.columns([1, 4])
-            with col_cb:
-                new_val = st.checkbox(
-                    f"{i}",
-                    value=st.session_state.segment_enabled[s_idx],
-                    key=f"sb_cb_{s_idx}",
-                    label_visibility="collapsed",
-                )
-                if new_val != st.session_state.segment_enabled[s_idx]:
-                    st.session_state.segment_enabled[s_idx] = new_val
-                    st.rerun()
-            with col_btn:
-                prefix = ">> " if i == review_idx else ""
-                label = f"{prefix}#{i + 1} {format_time(s_start)} {s_score / 100:.2f}"
-                if s_idx in readings:
-                    label += f" {short_label(readings[s_idx])}"
-                if st.button(label, key=f"sb_jump_{s_idx}"):
-                    st.session_state.review_idx = i
-                    st.rerun()
+    card_strip(
+        strip_items(sorted_scores, readings, ss.segment_enabled, ss.reviewed),
+        current=review_idx if review_idx < total_count else -1,
+        key="card_strip",
+        on_jump=jump,
+    )
 
-        scene_container = st.container(height=600)
-        with scene_container:
-            for i in visible:
-                scene_row(i)
-            # 絞り込みで外した候補も、閉じた折りたたみの中で描画し続ける。描画しないと
-            # Streamlit がチェックボックスの状態を捨て、次に表示したとき古い値に戻ることがある。
-            hidden = [i for i in range(total_count) if i not in set(visible)]
-            if hidden:
-                with st.expander(f"歌を特定できた候補（{len(hidden)}件）"):
-                    for i in hidden:
-                        scene_row(i)
-
-    # --- メインエリア ---
     if review_idx < total_count:
-        # 現在の区間
         idx, score = sorted_scores[review_idx]
+        reading = readings.get(idx)
         center = idx / 10.0
         seg_start = max(0.1, center - before)
         seg_end = min(center + after, len(waveform) / 10.0 - 0.1)
 
-        # 区間情報
-        st.markdown(
-            f"**#{review_idx + 1}** &nbsp; "
-            f"[{format_time(seg_start)} - {format_time(seg_end)}] &nbsp; "
-            f"Score: {score / 100}"
-        )
-        if idx in readings:
-            st.markdown(f"歌: {describe_reading(readings[idx])}")
-
-        # 既定オフ: 歌の特定を使えば全候補を流して聞く必要は減り、確かめたい候補だけ再生すればよい
-        auto_advance = st.checkbox(
-            "自動で次の候補を再生する",
-            value=False,
-            key="auto_advance",
-        )
-
-        # 音声プレビュー: 抽出済みWAVをスライス再生する
-        # (巨大な元動画からの再エンコードを避け、即座に確認できる)
-        with sf.SoundFile(st.session_state.audio_path) as af:
-            sr = af.samplerate
-            start_frame = min(int(seg_start * sr), max(0, af.frames - 1))
-            n_frames = max(1, int((seg_end - seg_start) * sr))
-            af.seek(start_frame)
-            audio_clip = af.read(
-                min(n_frames, af.frames - start_frame), dtype="float32"
-            )
-        st.audio(audio_clip, sample_rate=sr, autoplay=True)
-
-        # 映像はオンデマンド生成 (キャッシュあり)
-        cache_key = (idx, before, after)
-        if st.session_state.get("video_preview_key") == cache_key:
-            if cache_key not in st.session_state.preview_clips:
-                with st.spinner("プレビュー生成中..."):
-                    clip_dir = os.path.join(st.session_state.tmpdir, "previews")
+        col_main, col_side = st.columns([1.7, 1], gap="large")
+        with col_main:
+            # 映像はオンデマンド生成 (キャッシュあり)。巨大な元動画からの切り出しに数秒かかるので、
+            # まずは抽出済みの音声をすぐ再生し、映像は求められたときに作る
+            cache_key = (idx, before, after)
+            if ss.get("video_preview_key") == cache_key and cache_key not in ss.preview_clips:
+                with st.spinner("映像を用意しています..."):
+                    clip_dir = os.path.join(ss.tmpdir, "previews")
                     os.makedirs(clip_dir, exist_ok=True)
                     clip_path = os.path.join(clip_dir, f"preview_{idx}.mp4")
                     extract_preview_clip(
-                        input_video=st.session_state.input_video,
+                        input_video=ss.input_video,
                         center_sec=center,
                         before_sec=before,
                         after_sec=after,
                         output_path=clip_path,
                     )
-                    st.session_state.preview_clips[cache_key] = clip_path
-
-            clip_path = st.session_state.preview_clips[cache_key]
+                    ss.preview_clips[cache_key] = clip_path
+            clip_path = ss.preview_clips.get(cache_key)
             if clip_path and os.path.exists(clip_path):
                 st.video(clip_path, autoplay=True)
-        else:
-            if st.button("映像で確認"):
-                st.session_state.video_preview_key = cache_key
-                st.rerun()
+            else:
+                with sf.SoundFile(ss.audio_path) as af:
+                    sr = af.samplerate
+                    start_frame = min(int(seg_start * sr), max(0, af.frames - 1))
+                    n_frames = max(1, int((seg_end - seg_start) * sr))
+                    af.seek(start_frame)
+                    audio_clip = af.read(min(n_frames, af.frames - start_frame), dtype="float32")
+                st.audio(audio_clip, sample_rate=sr, autoplay=True)
+                if st.button("映像も見る"):
+                    ss.video_preview_key = cache_key
+                    st.rerun()
+            if reading is not None and (reading.before_text or reading.after_text):
+                st.caption(
+                    f"聞き取った言葉　直前「{reading.before_text}」　直後「{reading.after_text}」"
+                )
+            auto_next = st.checkbox("自動で次の候補を再生する", value=False, key="auto_advance")
+            auto_advance(auto_next, f"{review_idx}", NEXT_BUTTON_LABEL)
 
-        render_auto_advance(auto_advance, f"{review_idx}")
-
-        # 操作ボタン (絞り込み中は、表示している候補の間で移動する)
-        earlier = [i for i in visible if i < review_idx]
-        next_idx = next((i for i in visible if i > review_idx), total_count)
-        col_back, col_yes, col_no, col_skip = st.columns(4)
-        with col_back:
-            if st.button("← 戻る", disabled=not earlier):
-                st.session_state.review_idx = earlier[-1]
-                st.rerun()
-        with col_yes:
-            if st.button("はい"):
-                st.session_state.segment_enabled[idx] = True
-                st.session_state._sync_checkboxes = True
-                st.session_state.review_idx = next_idx
-                st.rerun()
-        with col_no:
-            if st.button("いいえ"):
-                st.session_state.segment_enabled[idx] = False
-                st.session_state._sync_checkboxes = True
-                st.session_state.review_idx = next_idx
-                st.rerun()
-        with col_skip:
-            if st.button(NEXT_BUTTON_LABEL):
-                st.session_state.review_idx = next_idx
-                st.rerun()
-    elif only_unidentified and not unidentified:
-        st.info("歌を特定できなかった候補はありません。このまま編集へ進めます。")
-    elif only_unidentified:
-        st.info("歌を特定できなかった候補の確認が完了しました。")
+        with col_side:
+            if readings and len(queue) <= 12:
+                st.html(queue_html(queue_steps(queue, sorted_scores, ss.segment_enabled, ss.reviewed, review_idx)))
+            elif review_idx in queue:
+                st.caption(f"{queue.index(review_idx) + 1} / {len(queue)} 件目")
+            st.markdown(f"**#{review_idx + 1}**　元動画 {format_time(center)}")
+            if idx in ss.reviewed:
+                st.caption(f"確認済み：{'残す' if ss.segment_enabled[idx] else '外す'}")
+            else:
+                st.caption(f"未確認（このままなら{'残ります' if ss.segment_enabled[idx] else '外れます'}）")
+            text = (
+                review_text(reading) if reading is not None
+                else {"title": "読みの候補です", "detail": "", "recommend": None}
+            )
+            st.markdown(f"### {text['title']}")
+            if text["detail"]:
+                st.write(text["detail"])
+            st.markdown("**この場面を短縮版に残しますか？**")
+            col_remove, col_keep = st.columns(2)
+            col_remove.button(
+                "外す", shortcut="N", on_click=decide, args=(False,), width="stretch",
+                type="primary" if text["recommend"] == "remove" else "secondary",
+            )
+            col_keep.button(
+                "残す", shortcut="Y", on_click=decide, args=(True,), width="stretch",
+                type="primary" if text["recommend"] == "keep" else "secondary",
+            )
+            col_prev, col_next = st.columns(2)
+            col_prev.button(
+                "前の件", shortcut="Left", on_click=move, args=(-1,), width="stretch",
+                disabled=neighbor(queue, review_idx, -1) is None,
+            )
+            col_next.button(NEXT_BUTTON_LABEL, shortcut="Right", on_click=move, args=(+1,), width="stretch")
+    elif not queue:
+        st.info("確かめる札はありません。このまま短縮版を作れます。")
+    elif all(sorted_scores[i][0] in ss.reviewed for i in queue):
+        st.info("確かめ終わりました。短縮版を作れます。")
     else:
-        st.info("全区間の確認が完了しました。")
+        left = sum(1 for i in queue if sorted_scores[i][0] not in ss.reviewed)
+        st.info(f"まだ確かめていない札が{left}件あります。札を押すと、その候補に戻れます。")
 
-    # 0件警告 & 編集遷移ボタン
+    with st.container(border=True, horizontal=True, vertical_alignment="center"):
+        st.metric("確認済み", f"{len(ss.reviewed)} / {total_count}")
+        st.metric("残す場面", enabled_count)
+        st.metric("短縮版の長さ", f"約{est_min}分{est_sec_remainder:.0f}秒")
+        if st.button("短縮版を作る", type="primary", disabled=enabled_count == 0):
+            ss.state = 3
+            st.rerun()
     if enabled_count == 0:
-        st.warning("有効な区間がありません。「← 戻る」で区間を選択し直してください。")
-
-    if st.button("確認を終了して編集へ", disabled=(enabled_count == 0)):
-        st.session_state.state = 3
-        st.rerun()
+        st.warning("残す場面がありません。札を押して、残す場面を選び直してください。")
 
 
 # ---------------------------------------------------------------------------
@@ -595,57 +612,124 @@ if st.session_state.state == 2:
 # ---------------------------------------------------------------------------
 
 if st.session_state.state == 3:
-    before = abs(slider_values[0])
-    after = abs(slider_values[1])
-    waveform = st.session_state.waveform
-    sorted_scores = st.session_state.sorted_scores
+    ss = st.session_state
+    st.html(stepper_html(4))
+    before, after = ss.clip_range
+    enabled_set = {idx for idx, v in ss.segment_enabled.items() if v}
+    segments = compute_segments(ss.sorted_scores, enabled_set, before, after, len(ss.waveform))
+    output_video = os.path.join(ss.tmpdir, "processed.mp4")
 
-    enabled_set = {
-        idx for idx, v in st.session_state.segment_enabled.items() if v
-    }
-    segments = compute_segments(
-        sorted_scores, enabled_set, before, after, len(waveform)
-    )
-    est_sec = estimate_duration(segments)
-    est_min = int(est_sec) // 60
-    est_sec_remainder = est_sec - est_min * 60
-    output_video = os.path.join(st.session_state.tmpdir, "processed.mp4")
+    col_main, _ = st.columns([1.7, 1], gap="large")
+    with col_main:
+        st.markdown("## 短縮版を作っています")
+        st.caption(f"残す{len(enabled_set)}場面をつないで、約{duration_jp(estimate_duration(segments))}の動画にします。")
+        progress = st.progress(0.0, text=export_progress_text(0.0, 0.0))
+        with st.container(border=True):
+            st.markdown(f"**{shortened_file_name(ss.source_name)}**")
+            st.caption("保存するときの名前です。場面ごとにチャプターを付け、チャプターの名前を元動画の時刻にします。")
+        st.caption("終わるまで、この画面を閉じたり再読み込みしたりしないでください。確認の結果が消え、解析からやり直しになります。")
+    cover_leftovers()
 
-    # State 2 と同数の要素を描画してから処理開始することで、
-    # ブロッキング中に旧 State 2 の UI が残るのを防ぐ
-    st.info('動画を編集中...しばらくお待ちください。')
-    col_m1, col_m2 = st.columns([1, 1])
-    with col_m1:
-        st.metric("対象区間", f"{len(segments)}")
-    with col_m2:
-        st.metric("推定出力", f"{est_min}分{est_sec_remainder:.0f}秒")
-    progress = st.progress(0)
-
+    started = time.monotonic()
     cut_and_concat_mp4(
-        input_video=st.session_state.input_video,
+        input_video=ss.input_video,
         segments=segments,
         output_video=output_video,
-        source_name=st.session_state.source_name,
-        progress_callback=lambda p: progress.progress(p),
+        source_name=ss.source_name,
+        progress_callback=lambda p: progress.progress(p, text=export_progress_text(p, time.monotonic() - started)),
     )
 
     with open(output_video, "rb") as f:
-        st.session_state.processed_video = f.read()
-
-    st.session_state.state = 4
+        ss.processed_video = f.read()
+    chapters = get_chapter_titles(output_video)
+    ss.result = {
+        "duration": get_media_duration_sec(output_video),
+        "scenes": len(enabled_set),
+        "chapters": len(chapters),
+        "first_chapter": chapters[0] if chapters else "",
+    }
+    ss.state = 4
     st.rerun()
 
 
 # ---------------------------------------------------------------------------
-# State 4: ダウンロード
+# State 4: 完了 (保存)
 # ---------------------------------------------------------------------------
 
-if st.session_state.state == 4:
-    st.success('動画の編集が完了しました')
-    st.download_button(
-        "ダウンロード",
-        data=st.session_state.processed_video,
-        file_name=shortened_file_name(st.session_state.source_name),
-        mime="video/mp4",
-        on_click=lambda: st.session_state.clear(),
+def _mark_saved() -> None:
+    # 押した時点で保存済みとみなす。ブラウザの保存が終わったか・取り消されたかは、
+    # Streamlit からは分からない
+    st.session_state.saved = True
+    st.session_state.confirm_start_over = False
+
+
+def _ask_start_over() -> None:
+    if st.session_state.get("saved"):
+        st.session_state.clear()
+    else:
+        st.session_state.confirm_start_over = True
+
+
+def _cancel_start_over() -> None:
+    st.session_state.confirm_start_over = False
+
+
+def _start_over() -> None:
+    st.session_state.clear()
+
+
+def _chapter_note_html(example: str) -> str:
+    sample = (f'<div style="margin:10px 0 0;padding:8px 12px;border-radius:6px;background:#E4E6DC;'
+              f'font-variant-numeric:tabular-nums;">{example}</div>') if example else ""
+    return (
+        '<div style="font-size:15px;font-weight:700;color:#3E443B;margin:8px 0 10px;">チャプターについて</div>'
+        '<div style="font-size:14px;line-height:1.8;color:#3E443B;">'
+        '場面ごとにチャプターがあり、名前はその場面の元動画の時刻です。'
+        'チャプターに対応した再生ソフトでは、一覧から場面へ移れます。'
+        f'{sample}</div>'
     )
+
+
+if st.session_state.state == 4:
+    ss = st.session_state
+    result = ss.result
+    st.html(stepper_html(5))
+    col_main, col_side = st.columns([1.7, 1], gap="large")
+    with col_main:
+        st.markdown("## 短縮版ができました")
+        source = ss.get("source_duration")
+        if source:
+            st.markdown(f"{duration_jp(source)}の試合が、{duration_jp(result['duration'])}になりました。")
+        else:
+            st.markdown(f"{duration_jp(result['duration'])}の短縮版になりました。")
+        with st.container(border=True):
+            st.markdown(f"**{shortened_file_name(ss.source_name)}**")
+            with st.container(horizontal=True):
+                st.metric("残した場面", result["scenes"])
+                st.metric("チャプター", result["chapters"])
+                st.metric("大きさ", _size_text(len(ss.processed_video)))
+            # 保存しても画面は消さない。以前は押した時点でセッションを消していたので、
+            # 保存に失敗したり保存先を間違えたりすると、作り直すしかなかった。
+            st.download_button(
+                "保存する",
+                data=ss.processed_video,
+                file_name=shortened_file_name(ss.source_name),
+                mime="video/mp4",
+                type="primary",
+                on_click=_mark_saved,
+            )
+            if ss.get("saved"):
+                st.caption("保存を始めました。ブラウザのダウンロードで確かめてください。何度でも保存し直せます。")
+            else:
+                st.caption("保存するまで、この画面を閉じたり再読み込みしたりしないでください。短縮版が消えます。")
+        if ss.get("confirm_start_over"):
+            st.warning("まだ保存していません。最初に戻ると、この短縮版は消えます。")
+            with st.container(horizontal=True):
+                st.button("保存せずに最初に戻る", on_click=_start_over)
+                st.button("やめる", on_click=_cancel_start_over)
+        else:
+            st.button("別の動画を短縮する", on_click=_ask_start_over)
+    with col_side:
+        st.html(_chapter_note_html(result.get("first_chapter", "")))
+        if result["chapters"] < result["scenes"]:
+            st.caption("間が短い場面どうしは、1つのチャプターにまとめています。")

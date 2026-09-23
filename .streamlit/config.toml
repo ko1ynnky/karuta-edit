@@ -1,2 +1,23 @@
 [server]
 maxUploadSize = 10240
+# 札の筆文字 (static/fonts) を配信する。配布版はオフラインでも動かすので Google Fonts は使わない
+enableStaticServing = true
+
+[client]
+# Deploy など開発者向けの表示を出さない
+toolbarMode = "minimal"
+
+[theme]
+base = "light"
+primaryColor = "#213A2F"
+backgroundColor = "#F2F3EE"
+secondaryBackgroundColor = "#E4E6DC"
+textColor = "#1F231E"
+borderColor = "#D5D8CC"
+baseRadius = "10px"
+
+# 札のかなだけに使う筆文字。ひらがな (U+3041-309F) だけに切り出してある (元は約8.4MB)
+[[theme.fontFaces]]
+family = "Yuji Syuku"
+url = "app/static/fonts/YujiSyuku-kana.woff"
+unicodeRange = "U+3041-309F"

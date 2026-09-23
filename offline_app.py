@@ -40,6 +40,11 @@ def get_media_duration_sec(input_media: str) -> float:
     return max(0.0, duration)
 
 
+def get_chapter_titles(input_media: str) -> list[str]:
+    probe = ffmpeg.probe(input_media, show_chapters=None)
+    return [c.get("tags", {}).get("title", "") for c in probe.get("chapters", [])]
+
+
 def _run_output_stream(
     output_stream,
     progress_callback=None,
