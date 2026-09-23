@@ -15,6 +15,7 @@ from offline_app import (
     simplify_waveform,
     cut_and_concat_mp4,
     extract_preview_clip,
+    shortened_file_name,
 )
 
 st.set_page_config(page_title="かるた動画自動編集アプリ", layout="wide")
@@ -260,9 +261,11 @@ with col_pick:
 
 if st.session_state.state == 1:
     input_video_path = None
+    source_name = None
     tmpdirname = None
 
     if uploaded_file is not None:
+        source_name = uploaded_file.name
         suffix = os.path.splitext(uploaded_file.name)[1]
         if suffix.lower() not in SUPPORTED_EXTS:
             st.error("対応している動画形式はMP4、MOV、WebMまたはMKVのみです。")
@@ -286,6 +289,7 @@ if st.session_state.state == 1:
             else:
                 # ローカルファイルはコピーせずそのまま使う (5GB級のコピーを回避)
                 input_video_path = local_path
+                source_name = os.path.basename(local_path)
 
 if st.session_state.state == 1 and input_video_path is not None:
     st.status('動画を分析中...しばらくお待ちください。')
@@ -306,6 +310,7 @@ if st.session_state.state == 1 and input_video_path is not None:
     st.session_state.update({
         "tmpdir": tmpdirname,
         "input_video": input_video_path,
+        "source_name": source_name,
         "audio_path": audio_path,
         "waveform": waveform,
         "sorted_scores": sorted_scores,
@@ -520,6 +525,7 @@ if st.session_state.state == 3:
         input_video=st.session_state.input_video,
         segments=segments,
         output_video=output_video,
+        source_name=st.session_state.source_name,
         progress_callback=lambda p: progress.progress(p),
     )
 
@@ -539,7 +545,7 @@ if st.session_state.state == 4:
     st.download_button(
         "ダウンロード",
         data=st.session_state.processed_video,
-        file_name="processed_video.mp4",
+        file_name=shortened_file_name(st.session_state.source_name),
         mime="video/mp4",
         on_click=lambda: st.session_state.clear(),
     )
