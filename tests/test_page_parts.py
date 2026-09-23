@@ -16,6 +16,10 @@ def test_leaving_is_free_before_analysis():
     assert needs_leave_guard(state=1, saved=False) is False
 
 
+def test_leaving_is_confirmed_while_analyzing():
+    assert needs_leave_guard(state=1, saved=False, analyzing=True) is True
+
+
 def test_stepper_marks_the_current_step_and_the_finished_ones():
     html = stepper_html(current=3)
     assert html.count('aria-current="step"') == 1

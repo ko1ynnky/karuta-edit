@@ -1,4 +1,4 @@
-"""Web版UIの仕様: 読手の声で候補を絞るか、読まれた歌を特定するかを解析前に選べる。"""
+"""Web版UIの仕様: 動画を選んでから解析を始め、確認画面で候補を1件ずつ確かめる。"""
 from streamlit.testing.v1 import AppTest
 
 
@@ -46,6 +46,73 @@ def test_poem_identification_toggle_can_be_turned_off_before_analysis():
     at.checkbox(key="identify_poems").uncheck().run()
     assert at.checkbox(key="identify_poems").value is False
     assert not at.exception
+
+
+# --- 開始画面 (動画を選ぶ・解析) ---
+
+def _video(tmp_path, seconds=4):
+    """ffmpeg で、音声つきの短い動画を作る。"""
+    import shutil
+    import subprocess
+    import pytest
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg が必要")
+    path = tmp_path / "match.mp4"
+    subprocess.run(
+        ["ffmpeg", "-v", "error", "-f", "lavfi", "-i", f"color=c=gray:s=320x180:d={seconds}",
+         "-f", "lavfi", "-i", f"sine=frequency=440:duration={seconds}", "-shortest", "-y", str(path)],
+        check=True,
+    )
+    return path
+
+
+def _choose(at, path):
+    at.text_input(key="local_path_input").input(str(path)).run()
+    return at
+
+
+def _start_button(at):
+    return next(b for b in at.button if b.label == "解析を始める")
+
+
+def test_analysis_cannot_start_before_a_video_is_chosen():
+    assert _start_button(_app()).disabled is True
+
+
+def test_choosing_a_video_shows_it_without_starting_analysis(tmp_path):
+    at = _choose(_app(), _video(tmp_path))
+    assert any("match.mp4" in m.value for m in at.markdown)
+    assert any("長さ 00:04" in m.value for m in at.markdown)
+    assert _start_button(at).disabled is False
+    assert at.session_state.state == 1
+
+
+def test_a_missing_file_is_reported(tmp_path):
+    at = _choose(_app(), tmp_path / "nothing.mp4")
+    assert any("見つかりません" in e.value for e in at.error)
+    assert _start_button(at).disabled is True
+
+
+def test_another_video_can_be_chosen_again(tmp_path):
+    at = _choose(_app(), _video(tmp_path))
+    next(b for b in at.button if b.label == "別の動画を選ぶ").click().run()
+    assert _start_button(at).disabled is True
+
+
+def test_settings_are_folded_and_summarized(tmp_path):
+    at = _app()
+    assert [e.label for e in at.expander] == ["詳細設定"]
+    assert any("上の句の1.5秒前から下の句の3.0秒後まで" in c.value for c in at.caption)
+
+
+def test_starting_analysis_goes_to_the_review_screen(tmp_path):
+    # 候補の検出は7秒以上の音声を前提にしている (utils.return_before_scores) ので、15秒にする
+    at = _choose(_app(), _video(tmp_path, seconds=15))
+    at.checkbox(key="identify_poems").uncheck().run()
+    _start_button(at).click().run(timeout=60)
+    assert not at.exception
+    assert at.session_state.state == 2
+    assert at.session_state.clip_range == (1.5, 3.0)
 
 
 # --- 確認画面 (State 2) ---
@@ -142,6 +209,15 @@ def test_without_identification_every_candidate_is_reviewed_in_order(tmp_path):
     assert _current(at) == "#1"
     _click(at, "次の件")
     assert _current(at) == "#2"
+
+
+def test_without_identification_checking_every_candidate_is_not_demanded(tmp_path):
+    # 実際には全候補を通しで確かめる人は少なく、誤検知が少し混ざる前提でそのまま作ることが多い
+    at = _review_app(tmp_path, identified=False)
+    texts = [m.value for m in at.markdown] + [c.value for c in at.caption]
+    assert any("読みの候補が4件見つかりました" in t for t in texts)
+    assert any("そのまま短縮版を作れます" in t for t in texts)
+    assert not any("確かめてください" in t for t in texts)
 
 
 def test_auto_advance_is_off_by_default(tmp_path):

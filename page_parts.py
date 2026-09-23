@@ -15,6 +15,8 @@ _PAGE_CSS = """
 [data-testid="stMainBlockContainer"] h3 { font-size: 1.25rem; padding: .2rem 0; }
 [data-testid="stHeader"] { background: transparent; }
 [data-testid="stMetricValue"] { font-size: 1.35rem; }
+@keyframes karuta-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .karuta-spin { animation: none !important; } }
 </style>
 """
 
@@ -55,13 +57,54 @@ def stepper_html(current: int) -> str:
     )
 
 
-def needs_leave_guard(state: int, saved: bool) -> bool:
+def needs_leave_guard(state: int, saved: bool, analyzing: bool = False) -> bool:
     """リロードやタブを閉じる前に確認するか。
 
-    確認中 (2) と書き出し中 (3) は、解析と確認の結果が消えて1〜数分かけて作り直しになる。
+    解析中と、確認中 (2)・書き出し中 (3) は、解析と確認の結果が消えて1〜数分かけて作り直しになる。
     完了 (4) は、保存するまで短縮版が消える。
     """
-    return state in (2, 3) or (state == 4 and not saved)
+    return analyzing or state in (2, 3) or (state == 4 and not saved)
+
+
+def step_html(status: str, title: str, detail: str = "") -> str:
+    """解析の段階1行。status は done (完了) / run (処理中) / todo (これから)。"""
+    if status == "done":
+        mark = ('<span style="width:24px;height:24px;flex-shrink:0;border-radius:50%;background:#213A2F;color:#FFFFFF;'
+                'display:flex;align-items:center;justify-content:center;">' + _CHECK + "</span>")
+    elif status == "run":
+        mark = ('<span class="karuta-spin" style="width:24px;height:24px;flex-shrink:0;box-sizing:border-box;'
+                'border-radius:50%;border:2px solid #213A2F;border-right-color:transparent;'
+                'animation:karuta-spin 1s linear infinite;"></span>')
+    else:
+        mark = ('<span style="width:24px;height:24px;flex-shrink:0;box-sizing:border-box;border-radius:50%;'
+                'border:1.5px solid #9DA396;"></span>')
+    color = "#1F231E" if status != "todo" else "#666B62"
+    sub = f'<div style="font-size:13px;color:#535A50;font-variant-numeric:tabular-nums;">{detail}</div>' if detail else ""
+    return (f'<div style="display:flex;gap:14px;align-items:flex-start;padding:6px 0;">{mark}'
+            f'<div><div style="font-size:15px;font-weight:700;color:{color};">{title}</div>{sub}</div></div>')
+
+
+_MINI_SLOT = 'width:40px;height:56px;box-sizing:border-box;border-radius:2px;flex-shrink:0;'
+FLOW_HTML = (
+    '<div style="font-size:15px;font-weight:700;color:#3E443B;margin:8px 0 18px;">このあとの流れ</div>'
+    '<ol style="margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:22px;">'
+    '<li style="display:flex;gap:18px;align-items:center;">'
+    f'<span style="{_MINI_SLOT}border:1.5px dashed #A8A383;"></span>'
+    '<div><div style="font-size:15px;font-weight:700;">1　読みの候補を探す</div>'
+    '<div style="font-size:13px;line-height:1.7;color:#535A50;">音声から、上の句の読み始めを見つけます。</div></div></li>'
+    '<li style="display:flex;gap:18px;align-items:center;">'
+    f'<span style="{_MINI_SLOT}border:1px solid #BDB795;background:#FFFFFF;display:flex;align-items:center;justify-content:center;">'
+    '<span style="writing-mode:vertical-rl;font-family:\'Yuji Syuku\',\'Hiragino Mincho ProN\',serif;font-size:8px;'
+    'line-height:1.3;"><span style="display:block;">からくれな</span><span style="display:block;">ゐにみづく</span>'
+    '<span style="display:block;">くるとは</span></span></span>'
+    '<div><div style="font-size:15px;font-weight:700;">2　読まれた歌を聞き分ける</div>'
+    '<div style="font-size:13px;line-height:1.7;color:#535A50;">歌が分かった場面は、そのまま短縮版に入ります。</div></div></li>'
+    '<li style="display:flex;gap:18px;align-items:center;">'
+    f'<span style="{_MINI_SLOT}border:2px solid #B8321F;background:#2A4436;"></span>'
+    '<div><div style="font-size:15px;font-weight:700;">3　分からなかった場面を確かめる</div>'
+    '<div style="font-size:13px;line-height:1.7;color:#535A50;">残すか外すかを、あなたが決めます。</div></div></li>'
+    '</ol>'
+)
 
 
 _GUARD_JS = """
