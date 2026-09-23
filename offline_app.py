@@ -333,24 +333,35 @@ def _write_source_time_chapters(
         f.write("\n".join(lines) + "\n")
 
 
+def _source_creation_time(input_video: str) -> str | None:
+    return ffmpeg.probe(input_video)["format"].get("tags", {}).get("creation_time")
+
+
 def _mux_video_and_audio(
     video_path: str,
     audio_path: str,
     chapters_path: str,
     source_name: str,
+    creation_time: str | None,
     output_video: str,
     audio_options: dict[str, object],
 ):
     # ffmpeg-python は映像・音声のストリームを持つ入力しかコマンドに含めないため、
     # チャプターだけの FFMETADATA を入力に加えられず、ここは直接 ffmpeg を呼ぶ
     audio_args = [arg for key, value in audio_options.items() for arg in (f"-{key}", str(value))]
+    metadata_args = ["-metadata", f"comment=元動画: {source_name}"]
+    # 元動画のメタデータは撮影日時だけを引き継ぐ。iPhone の撮影場所や機種は moov 直下の
+    # meta にあり、ffmpeg は MP4 では udta の中にしか書けず写真アプリが読めないうえ、
+    # 撮影場所を共有先に渡さずに済む
+    if creation_time:
+        metadata_args += ["-metadata", f"creation_time={creation_time}"]
     result = subprocess.run(
         [
             "ffmpeg", "-v", "error", "-y",
             "-i", video_path, "-i", audio_path, "-i", chapters_path,
             "-map", "0:v:0", "-map", "1:a:0", "-map_chapters", "2",
             "-c:v", "copy", *audio_args,
-            "-metadata", f"comment=元動画: {source_name}",
+            *metadata_args,
             "-movflags", "+faststart",
             output_video,
         ],
@@ -788,6 +799,7 @@ def cut_and_concat_mp4(
                 audio_path=aligned_wav,
                 chapters_path=chapters_path,
                 source_name=source_name or os.path.basename(input_video),
+                creation_time=_source_creation_time(input_video),
                 output_video=output_video,
                 audio_options=audio_options,
             )
