@@ -1,0 +1,200 @@
+# macOS 版と Windows 版を作り、GitHub の Releases に置く。
+# Actions タブの「Release」→「Run workflow」で、バージョンを入れて実行する (push では動かない)。
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "バージョン (例: v1.1.0)。この名前でタグとリリースを作る"
+        required: true
+        type: string
+      draft:
+        description: "下書きとして作る (公開は Releases の画面から行う)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.version }}
+
+env:
+  VERSION: ${{ inputs.version }}
+
+jobs:
+  check:
+    name: バージョンとテストの確認
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: バージョンの形とタグの重複を確かめる
+        run: |
+          if ! [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::バージョンは v1.2.3 の形で入れてください: $VERSION"
+            exit 1
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/$VERSION" >/dev/null; then
+            echo "::error::タグ $VERSION はもうあります"
+            exit 1
+          fi
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: テスト
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q ffmpeg
+          python -m pip install -r requirements.txt -r requirements-dev.txt -c constraints-build.txt
+          python -m pytest tests -q
+
+  build-macos:
+    name: macOS 版 (Apple シリコン)
+    needs: check
+    # 実行環境の macOS が新しいほど、pip が新しい macOS 向けの wheel を選び、古い Mac で動かなくなりやすい。
+    # そのため、使える Apple シリコンの実行環境のうち古いほうを使う
+    runs-on: macos-15
+    env:
+      KARUTA_EDIT_VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      # 手元でビルドするときと同じ手順にするため、ビルドスクリプトをそのまま使う
+      - name: ビルド
+        run: ./build_macos.sh
+      - name: 使った版を記録する
+        run: .venv_mac_build/bin/python -m pip freeze
+      - name: 署名 (アドホック) が壊れていないか
+        run: codesign --verify --deep --strict --verbose=2 dist/karuta-edit.app
+      - name: 自己診断
+        run: dist/karuta-edit.app/Contents/MacOS/karuta-edit --self-test
+      - name: 起動して画面と筆文字を返すか
+        run: |
+          KARUTA_EDIT_HEADLESS=1 dist/karuta-edit.app/Contents/MacOS/karuta-edit > launch.log 2>&1 &
+          pid=$!
+          for i in $(seq 60); do
+            curl -sf http://localhost:8501/_stcore/health && break
+            sleep 2
+          done
+          status=0
+          curl -sf -o /dev/null http://localhost:8501/ || status=1
+          curl -sf -o /dev/null http://localhost:8501/app/static/fonts/YujiSyuku-kana.woff || status=1
+          kill -9 "$pid" || true
+          cat launch.log
+          exit $status
+      - name: zip にまとめる
+        run: |
+          mkdir -p package/karuta-edit/licenses
+          ditto dist/karuta-edit.app package/karuta-edit/karuta-edit.app
+          cp packaging/macos/*.html package/karuta-edit/
+          LC_ALL=C sed -i '' "s|{{VERSION}}|$VERSION|g; s|{{REPOSITORY}}|$GITHUB_REPOSITORY|g" package/karuta-edit/*.html
+          # 同梱した ffmpeg のライセンス表示 (GPL v2 以降) と全文、筆文字の OFL
+          ffmpeg/ffmpeg -hide_banner -L > package/karuta-edit/licenses/FFmpeg.txt
+          cp packaging/licenses/GPL-2.0.txt static/fonts/YujiSyuku-OFL.txt package/karuta-edit/licenses/
+          # .app の中のシンボリックリンクと署名を保つため、zip コマンドではなく ditto で作る
+          ditto -c -k --sequesterRsrc --keepParent package/karuta-edit "karuta-edit-$VERSION-macos-arm64.zip"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos
+          path: karuta-edit-*-macos-arm64.zip
+          retention-days: 7
+
+  build-windows:
+    name: Windows 版 (64 ビット)
+    needs: check
+    runs-on: windows-2025
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: 依存パッケージ
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -c constraints-build.txt pyinstaller
+          python -m pip freeze
+      - name: ffmpeg を用意する
+        run: |
+          # gyan.dev の essentials 版 (GPL)。配布元が出しているハッシュで中身を確かめる
+          $url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+          Invoke-WebRequest $url -OutFile ffmpeg.zip
+          $expected = (Invoke-WebRequest "$url.sha256").Content.Trim()
+          $actual = (Get-FileHash ffmpeg.zip -Algorithm SHA256).Hash.ToLower()
+          if ($actual -ne $expected) { throw "ffmpeg のハッシュが一致しません: $actual / $expected" }
+          Expand-Archive ffmpeg.zip -DestinationPath ffmpeg-src
+          New-Item -ItemType Directory -Force ffmpeg | Out-Null
+          $bin = Get-ChildItem ffmpeg-src -Recurse -Directory -Filter bin | Select-Object -First 1
+          Copy-Item "$($bin.FullName)\ffmpeg.exe", "$($bin.FullName)\ffprobe.exe" ffmpeg\
+          ffmpeg\ffmpeg.exe -version | Select-Object -First 1
+      - name: ビルド
+        run: pyinstaller karuta_edit.spec --noconfirm
+      - name: 自己診断
+        run: |
+          dist\karuta-edit\karuta-edit.exe --self-test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: 起動して画面と筆文字を返すか
+        run: |
+          $env:KARUTA_EDIT_HEADLESS = "1"
+          $p = Start-Process dist\karuta-edit\karuta-edit.exe -PassThru -RedirectStandardOutput launch.log -RedirectStandardError launch-err.log
+          $ok = $false
+          for ($i = 0; $i -lt 60; $i++) {
+            try {
+              if ((Invoke-WebRequest http://localhost:8501/_stcore/health -TimeoutSec 2).Content -eq "ok") { $ok = $true; break }
+            } catch {}
+            Start-Sleep -Seconds 2
+          }
+          try {
+            Invoke-WebRequest http://localhost:8501/ | Out-Null
+            Invoke-WebRequest http://localhost:8501/app/static/fonts/YujiSyuku-kana.woff | Out-Null
+          } catch { $ok = $false }
+          Stop-Process -Id $p.Id -Force
+          Get-Content launch.log, launch-err.log
+          if (-not $ok) { exit 1 }
+      - name: zip にまとめる
+        run: |
+          New-Item -ItemType Directory package | Out-Null
+          Copy-Item -Recurse dist\karuta-edit package\karuta-edit
+          Copy-Item packaging\windows\*.html package\karuta-edit\
+          # 同梱した ffmpeg のライセンス表示 (GPL v3) と全文、筆文字の OFL
+          New-Item -ItemType Directory package\karuta-edit\licenses | Out-Null
+          ffmpeg\ffmpeg.exe -hide_banner -L | Set-Content package\karuta-edit\licenses\FFmpeg.txt -Encoding utf8
+          Copy-Item packaging\licenses\GPL-3.0.txt, static\fonts\YujiSyuku-OFL.txt package\karuta-edit\licenses\
+          Get-ChildItem package\karuta-edit\*.html | ForEach-Object {
+            (Get-Content $_ -Raw -Encoding utf8).Replace("{{VERSION}}", $env:VERSION).Replace("{{REPOSITORY}}", $env:GITHUB_REPOSITORY) |
+              Set-Content $_ -NoNewline -Encoding utf8
+          }
+          Compress-Archive -Path package\karuta-edit -DestinationPath "karuta-edit-$env:VERSION-windows-x64.zip"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows
+          path: karuta-edit-*-windows-x64.zip
+          retention-days: 7
+
+  release:
+    name: Releases に置く
+    needs: [build-macos, build-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          path: assets
+          merge-multiple: true
+      - name: リリースを作る
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DRAFT: ${{ inputs.draft }}
+        run: |
+          sed "s|{{VERSION}}|$VERSION|g" packaging/release-notes.md > notes.md
+          flags=()
+          if [ "$DRAFT" = "true" ]; then flags+=(--draft); fi
+          gh release create "$VERSION" assets/*.zip \
+            --target "$GITHUB_SHA" \
+            --title "karuta-edit $VERSION" \
+            --notes-file notes.md \
+            --generate-notes \
+            "${flags[@]}"

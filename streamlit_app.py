@@ -1,13 +1,11 @@
 import streamlit as st
 import numpy as np
-import importlib.util
 import shutil
 import soundfile as sf
-import subprocess
-import sys
 import tempfile
 import os
 import time
+from file_dialog import pick_video_file
 from card_strip import card_strip, neighbor, queue_steps, review_queue, strip_items
 from page_parts import (
     FLOW_HTML,
@@ -86,20 +84,6 @@ def estimate_duration(segments: list[tuple[float, float]]) -> float:
 NEXT_BUTTON_LABEL = "次の件"
 
 
-_TK_DIALOG_CODE = """
-import tkinter as tk
-from tkinter import filedialog
-root = tk.Tk()
-root.withdraw()
-root.attributes("-topmost", True)
-path = filedialog.askopenfilename(
-    title="動画ファイルを選択",
-    filetypes=[("動画", "*.mp4 *.mov *.webm *.mkv"), ("すべて", "*.*")],
-)
-print(path)
-"""
-
-
 def identify_candidate_poems(
     audio_path: str, tmpdir: str, sorted_scores: list[tuple[int, float]]
 ) -> dict:
@@ -133,46 +117,6 @@ def identify_candidate_poems(
         st.warning(f"読まれた歌を特定できませんでした（{e}）。歌の表示なしで続けます。")
         return {}
     return {idx: reading for (idx, _), reading in zip(sorted_scores, readings)}
-
-
-def pick_video_file() -> str | None:
-    """サーバ側でOSネイティブのファイル選択ダイアログを開き、選択パスを返す。
-
-    ブラウザのセキュリティ制約上、ページ内のファイル選択UIからは
-    ローカルパスを取得できないため、同一マシンで動くこのプロセス側から開く。
-    Streamlitのスクリプトスレッドからtkinterを直接使うとmacOSで
-    クラッシュするため、いずれの方式もサブプロセスで実行する。
-    キャンセル時・ダイアログを開けない環境では None を返す。
-    """
-    if sys.platform == "darwin":
-        # macOSはtkinterが未導入のPython環境が多いため、標準のosascriptを使う
-        cmd = [
-            "osascript", "-e",
-            'POSIX path of (choose file with prompt "動画ファイルを選択")',
-        ]
-    elif importlib.util.find_spec("tkinter") is not None:
-        cmd = [sys.executable, "-c", _TK_DIALOG_CODE]
-    elif sys.platform == "win32":
-        cmd = [
-            "powershell", "-NoProfile", "-Command",
-            "Add-Type -AssemblyName System.Windows.Forms; "
-            "$d = New-Object System.Windows.Forms.OpenFileDialog; "
-            "$d.Filter = '動画|*.mp4;*.mov;*.webm;*.mkv|すべて|*.*'; "
-            "if ($d.ShowDialog() -eq 'OK') { $d.FileName }",
-        ]
-    else:
-        cmd = [
-            "zenity", "--file-selection", "--title=動画ファイルを選択",
-            "--file-filter=動画 | *.mp4 *.mov *.webm *.mkv",
-        ]
-
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True)
-    except FileNotFoundError:
-        return None
-    if result.returncode != 0:
-        return None
-    return result.stdout.strip() or None
 
 
 # ---------------------------------------------------------------------------

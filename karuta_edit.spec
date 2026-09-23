@@ -27,6 +27,8 @@ for pkg in (
     "numpy",
     "tqdm",
     "ffmpeg",  # ffmpeg-python
+    "sherpa_onnx",  # 読まれた歌の聞き分け (音声認識)。onnxruntime などの共有ライブラリを含む
+    "pykakasi",  # 聞き取った言葉をかなにする。辞書データを含む
 ):
     pkg_datas, pkg_binaries, pkg_hidden = collect_all(pkg)
     datas += pkg_datas
@@ -36,13 +38,26 @@ for pkg in (
 # Streamlit はバージョン情報(metadata)を実行時に参照するため明示的に同梱
 datas += copy_metadata("streamlit")
 
-# アプリ本体スクリプト群（exe 展開先のルートに配置）
+# アプリ本体。streamlit_app.py は Streamlit がファイルとして読み込むので、PyInstaller は
+# 中の import をたどらない。足したファイルは tests/test_build_spec.py が漏れを見つける
+APP_FILES = [
+    "streamlit_app.py",
+    "card_strip.py",
+    "file_dialog.py",
+    "hyakunin_isshu.py",
+    "offline_app.py",
+    "page_parts.py",
+    "poem_id.py",
+    "reader_voice.py",
+    "utils.py",
+]
+datas += [(f, ".") for f in APP_FILES]
 datas += [
-    ("streamlit_app.py", "."),
-    ("utils.py", "."),
-    ("offline_app.py", "."),
+    ("static", "static"),  # 札の筆文字 (server.enableStaticServing で配る)
     (".streamlit/config.toml", ".streamlit"),
 ]
+# 各ファイルの import (標準ライブラリの bz2・tarfile など) も同梱させるため、モジュールとして解析させる
+hiddenimports += [os.path.splitext(f)[0] for f in APP_FILES]
 
 # 同梱 ffmpeg（ビルド前に ./ffmpeg/ へ ffmpeg.exe と ffprobe.exe を置く）
 _ffmpeg_dir = "ffmpeg"
