@@ -1,13 +1,18 @@
-"""短縮版の音声と映像の同期の仕様。
+"""短縮版の音声と映像の同期と、元動画との時刻の対応の仕様。
 
 競技かるたでは読みの音と動き出しの時間差が反応の速さそのものなので、
 短縮版の各区間で音と映像が 1 フレーム未満の精度でそろっている必要がある。
 再生アプリには音声をタイムスタンプではなくデコード順に続けて鳴らすもの
 (QuickTime など) があるため、音声を先頭から続けてデコードしたときにそろうことを確かめる。
 
+短縮版で見つけた場面を元動画 (10bit などの元の画質) で確かめられるよう、短縮版には
+区間ごとのチャプターがあり、名前に区間の先頭の元動画での時刻が入っている。
+短縮版の再生位置 t の元動画での時刻は t - チャプターの開始 + チャプター名の時刻。
+
 テスト素材は 59.94fps の映像で、97 フレームごとに 1 フレームだけ白く光り、
 同じ瞬間にビープ音が鳴り始める。
 """
+import json
 import subprocess
 import sys
 
@@ -144,6 +149,61 @@ def test_each_segment_keeps_the_frames_inside_its_range(source, shortened):
     )
     _, frame_times = _flash_times(shortened)
     assert len(frame_times) == expected
+
+
+def _format_info(path):
+    return json.loads(subprocess.run(
+        ["ffprobe", "-v", "error", "-show_chapters", "-show_format", "-of", "json", str(path)],
+        check=True, capture_output=True, text=True,
+    ).stdout)
+
+
+def _chapters(path):
+    """(開始, 終了, チャプター名が示す元動画の時刻) の一覧。時刻は秒。"""
+    chapters = []
+    for c in _format_info(path)["chapters"]:
+        hh, mm, ss = c["tags"]["title"].split()[-1].split(":")
+        source_sec = int(hh) * 3600 + int(mm) * 60 + float(ss)
+        chapters.append((float(c["start_time"]), float(c["end_time"]), source_sec))
+    return chapters
+
+
+def test_chapter_titles_tell_the_source_time_of_every_flash(source, shortened):
+    source_start = float(_format_info(source)["format"].get("start_time", 0))
+    source_flashes = _flash_times(source)[0] - source_start
+    chapters = _chapters(shortened)
+    flashes, _ = _flash_times(shortened)
+    assert len(flashes) >= len(SEGMENTS)
+    for t in flashes:
+        start, _, source_sec = next(c for c in chapters if c[0] <= t < c[1])
+        estimated = t - start + source_sec
+        assert np.min(np.abs(source_flashes - estimated)) < TOLERANCE_SEC, round(t, 3)
+
+
+def test_chapters_follow_the_segments_from_start_to_end_without_gaps(shortened):
+    chapters = _chapters(shortened)
+    _, frame_times = _flash_times(shortened)
+    assert len(chapters) == len(SEGMENTS)
+    assert chapters[0][0] == 0
+    assert all(prev[1] == nxt[0] for prev, nxt in zip(chapters, chapters[1:]))
+    assert abs(chapters[-1][1] - (frame_times[-1] + 1 / FPS)) < 0.002
+    source_starts = [c[2] for c in chapters]
+    assert source_starts == sorted(source_starts)
+    for (start, _), source_sec in zip(SEGMENTS, source_starts):
+        assert start <= source_sec < start + 1 / FPS
+
+
+def test_source_file_name_is_recorded_in_the_shortened_video(source, tmp_path):
+    # アップロードされた動画は一時ファイル名で処理されるので、元の名前を別に渡せる
+    out = tmp_path / "short.mp4"
+    cut_and_concat_mp4(
+        input_video=str(source),
+        segments=SEGMENTS[:1],
+        output_video=str(out),
+        encoder_mode="libx264",
+        source_name="2026-09-20_5_第5試合.MOV",
+    )
+    assert "2026-09-20_5_第5試合.MOV" in _format_info(out)["format"]["tags"]["comment"]
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="VideoToolbox は macOS のみ")

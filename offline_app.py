@@ -302,27 +302,63 @@ def _write_audio_following_video(
                 dst.write(_read_zero_padded(src, first, bounds[k + 1] - bounds[k]))
 
 
+def _format_timestamp(sec: float) -> str:
+    ms = round(sec * 1000)
+    return f"{ms // 3_600_000:02d}:{ms // 60_000 % 60:02d}:{ms // 1000 % 60:02d}.{ms % 1000:03d}"
+
+
+def _write_source_time_chapters(
+    placements: list[tuple[float, float]],
+    total_duration_sec: float,
+    output_path: str,
+):
+    """区間ごとのチャプターを FFMETADATA 形式で書き出す。
+
+    チャプター名は区間の先頭が元動画のどの時刻かを示す (例: "03 元動画 00:12:51.617")。
+    短縮版の再生位置 t の元動画での時刻は t - チャプターの開始 + チャプター名の時刻。
+    """
+    width = max(2, len(str(len(placements))))
+    starts_ms = [round(out_sec * 1000) for out_sec, _ in placements]
+    ends_ms = starts_ms[1:] + [round(total_duration_sec * 1000)]
+    lines = [";FFMETADATA1"]
+    for k, ((_, source_sec), start_ms, end_ms) in enumerate(zip(placements, starts_ms, ends_ms)):
+        lines += [
+            "[CHAPTER]",
+            "TIMEBASE=1/1000",
+            f"START={start_ms}",
+            f"END={end_ms}",
+            f"title={k + 1:0{width}d} 元動画 {_format_timestamp(source_sec)}",
+        ]
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+
+
 def _mux_video_and_audio(
     video_path: str,
     audio_path: str,
+    chapters_path: str,
+    source_name: str,
     output_video: str,
     audio_options: dict[str, object],
 ):
-    video = ffmpeg.input(video_path).video
-    audio = ffmpeg.input(audio_path).audio
-    (
-        ffmpeg
-        .output(
-            video,
-            audio,
+    # ffmpeg-python は映像・音声のストリームを持つ入力しかコマンドに含めないため、
+    # チャプターだけの FFMETADATA を入力に加えられず、ここは直接 ffmpeg を呼ぶ
+    audio_args = [arg for key, value in audio_options.items() for arg in (f"-{key}", str(value))]
+    result = subprocess.run(
+        [
+            "ffmpeg", "-v", "error", "-y",
+            "-i", video_path, "-i", audio_path, "-i", chapters_path,
+            "-map", "0:v:0", "-map", "1:a:0", "-map_chapters", "2",
+            "-c:v", "copy", *audio_args,
+            "-metadata", f"comment=元動画: {source_name}",
+            "-movflags", "+faststart",
             output_video,
-            vcodec="copy",
-            movflags="+faststart",
-            **audio_options,
-        )
-        .overwrite_output()
-        .run(quiet=True)
+        ],
+        capture_output=True,
     )
+    if result.returncode != 0:
+        # 呼び出し元のフォールバックは ffmpeg-python の例外で判定しているので、それにそろえる
+        raise ffmpeg.Error("ffmpeg", result.stdout, result.stderr)
 
 
 def _first_positive_int(values: list[object]) -> int | None:
@@ -498,9 +534,15 @@ def cut_and_concat_mp4(
     parallel_workers: int = 2,
     seek_preroll_sec: float = 1.5,
     prefer_hw_decode: bool = True,
+    source_name: str | None = None,
     progress_callback=None,
     timing_callback=None,
 ):
+    """segments の区間を切り出してつなぎ、output_video に書き出す。
+
+    source_name は短縮版に記録する元動画のファイル名 (省略時は input_video のファイル名)。
+    アップロードされた動画のように一時ファイル名で処理するときに、元の名前を渡す。
+    """
     def emit_timing(stage: str, elapsed_sec: float, **meta):
         if timing_callback is None:
             return
@@ -723,11 +765,12 @@ def cut_and_concat_mp4(
             source_wav = os.path.join(tmp_dir, "source_audio.wav")
             aligned_wav = os.path.join(tmp_dir, "aligned_audio.wav")
             source_start_sec = _extract_audio_pcm(input_video, source_wav)
+            total_duration_sec = float(output_frame_times[-1] + last_frame_duration)
             _write_audio_following_video(
                 source_wav=source_wav,
                 source_start_sec=source_start_sec,
                 placements=placements,
-                total_duration_sec=float(output_frame_times[-1] + last_frame_duration),
+                total_duration_sec=total_duration_sec,
                 output_wav=aligned_wav,
             )
             emit_timing("build_audio", time.perf_counter() - audio_started_at)
@@ -735,9 +778,16 @@ def cut_and_concat_mp4(
                 progress_callback(0.99)
 
             mux_started_at = time.perf_counter()
+            # 元動画との対応は別ファイルにせず動画に埋め込む。Web版のダウンロードは
+            # 1 回で画面の状態を消すので 2 つ目のファイルを渡しにくく、別ファイルだと
+            # 動画だけが共有されて対応が失われやすい
+            chapters_path = os.path.join(tmp_dir, "chapters.txt")
+            _write_source_time_chapters(placements, total_duration_sec, chapters_path)
             _mux_video_and_audio(
                 video_path=video_only_path,
                 audio_path=aligned_wav,
+                chapters_path=chapters_path,
+                source_name=source_name or os.path.basename(input_video),
                 output_video=output_video,
                 audio_options=audio_options,
             )
