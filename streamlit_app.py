@@ -15,6 +15,7 @@ from offline_app import (
     simplify_waveform,
     cut_and_concat_mp4,
     extract_preview_clip,
+    shortened_file_name,
 )
 
 st.set_page_config(page_title="かるた動画自動編集アプリ", layout="wide")
@@ -544,7 +545,7 @@ if st.session_state.state == 4:
     st.download_button(
         "ダウンロード",
         data=st.session_state.processed_video,
-        file_name="processed_video.mp4",
+        file_name=shortened_file_name(st.session_state.source_name),
         mime="video/mp4",
         on_click=lambda: st.session_state.clear(),
     )

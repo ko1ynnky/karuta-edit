@@ -472,6 +472,10 @@ def _build_encode_options(
 _DEFAULT_ENCODER = "videotoolbox_h264" if sys.platform == "darwin" else "libx264"
 
 
+def shortened_file_name(source_name: str) -> str:
+    return f"{os.path.splitext(source_name)[0]}_short.mp4"
+
+
 def extract_audio(input_video: str, output_audio: str):
     """MP4などの動画から音声を抽出してWAVに変換"""
     probe = ffmpeg.probe(input_video)
