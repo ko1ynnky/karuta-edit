@@ -125,9 +125,16 @@ export default function (component) {
   // 描き替えた直後にその場で位置を決める。requestAnimationFrame だけに任せると、
   // 前面にないタブでは描画が止まり、列が送られないままになる
   place();
-  const observer = new ResizeObserver(place);
-  observer.observe(root);
-  return () => observer.disconnect();
+  // 後片付けは部品が外されたときにしか呼ばれないので、描くたびに観測を足さず、1つを使い回す
+  root._place = place;
+  if (!root._observer) {
+    root._observer = new ResizeObserver(() => root._place());
+    root._observer.observe(root);
+  }
+  return () => {
+    root._observer.disconnect();
+    root._observer = null;
+  };
 }
 """
 

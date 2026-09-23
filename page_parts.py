@@ -107,13 +107,22 @@ FLOW_HTML = (
 )
 
 
+# この関数は描き直すたびに呼ばれるが、返した後片付けは部品が外されたときにしか呼ばれない
+# (2026-09-23 に試作で確認)。描くたびに listener を足すと、保存後や最初の画面に戻っても
+# 確認が出続けたので、listener は1つだけ付け、確認するかは最新の値で決める
 _GUARD_JS = """
 export default function (component) {
   const { data } = component;
-  if (!data || !data.active) return;
-  const onBeforeUnload = (e) => { e.preventDefault(); e.returnValue = ''; };
-  window.addEventListener('beforeunload', onBeforeUnload);
-  return () => window.removeEventListener('beforeunload', onBeforeUnload);
+  window.__karutaLeaveGuard = Boolean(data && data.active);
+  if (!window.__karutaLeaveGuardInstalled) {
+    window.__karutaLeaveGuardInstalled = true;
+    window.addEventListener('beforeunload', (e) => {
+      if (!window.__karutaLeaveGuard) return;
+      e.preventDefault();
+      e.returnValue = '';
+    });
+  }
+  return () => { window.__karutaLeaveGuard = false; };
 }
 """
 
