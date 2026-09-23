@@ -15,7 +15,8 @@ import tqdm
 
 
 
-from utils import return_top_scores
+from reader_voice import compute_voiced_frames
+from utils import return_candidates
 
 
 def get_audio_sample_rate(input_video: str) -> int | None:
@@ -656,6 +657,8 @@ def extract_preview_clip(
 def main():
     before = 0.5
     after = 2.5
+    # Web版の「読手の声で候補を絞る」と同じく既定オフ (雑音の多い動画でのみ True にする)
+    use_reader_voice = False
 
     file_names = os.listdir("offline_app")
 
@@ -674,7 +677,8 @@ def main():
 
         print("loaded simplified waveform. Time: ", time.time() - start_time)
 
-        _, score_dict = return_top_scores(waveform)
+        voiced = compute_voiced_frames(f"offline_app/{file_name}.wav") if use_reader_voice else None
+        score_dict = return_candidates(waveform, voiced)
 
         print("calculated scores. Time: ", time.time() - start_time)
 
