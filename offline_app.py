@@ -110,32 +110,13 @@ def _merge_close_segments(
     return merged
 
 
-def _get_primary_video_codec(input_video: str) -> str | None:
-    probe = ffmpeg.probe(input_video)
-    video_stream = next(
-        (s for s in probe["streams"] if s["codec_type"] == "video"),
-        None,
-    )
-    if video_stream is None:
-        return None
-    codec = video_stream.get("codec_name")
-    if not codec:
-        return None
-    return str(codec)
-
-
-def _build_decode_input_options(
-    input_video: str,
-    prefer_hw_decode: bool,
-) -> dict[str, object]:
+def _build_decode_input_options(prefer_hw_decode: bool) -> dict[str, object]:
     if not prefer_hw_decode:
         return {}
-
-    codec = _get_primary_video_codec(input_video)
-    if codec == "hevc":
-        return {"hwaccel": "videotoolbox", "c:v": "hevc_videotoolbox"}
-    if codec == "h264":
-        return {"hwaccel": "videotoolbox", "c:v": "h264_videotoolbox"}
+    # デコーダ (-c:v) は指定しない。hevc_videotoolbox / h264_videotoolbox は
+    # エンコーダ名でデコーダとしては存在せず、指定すると必ず失敗して
+    # ソフトウェアデコードへのフォールバックになる。-hwaccel だけで標準の
+    # デコーダが VideoToolbox を使い、使えないコーデックならソフトウェアで復号する。
     return {"hwaccel": "videotoolbox"}
 
 
@@ -763,7 +744,6 @@ def cut_and_concat_mp4(
         )
 
     primary_decode_options = _build_decode_input_options(
-        input_video=input_video,
         prefer_hw_decode=bool(prefer_hw_decode and encoder_mode == "videotoolbox_h264"),
     )
 
