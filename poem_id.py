@@ -33,6 +33,11 @@ BEFORE_WINDOW = (-10.0, -0.3)
 # 読み以外の発話 (挨拶・相づち) は 0.71 以上だった。1試合だけで決めた値なので、試合を増やして見直す。
 MAX_COST = 0.7
 
+# 直後の上の句と次の読みの前の下の句が食い違ったとき、上の句の cost がこれ以下なら上の句を採る。
+# 4試合の食い違い6件では、正しい上の句は 0.294 以下、誤った上の句 (雑談などを句に当てはめたもの) は
+# 0.647 だった。上の句が正しいのは、間の読みが候補になっていないとき。
+CLEAR_KAMI_COST = 0.5
+
 _FOLD = str.maketrans({"は": "わ", "へ": "え", "を": "お", "ぢ": "じ", "づ": "ず", "ゐ": "い", "ゑ": "え"})
 
 
@@ -51,7 +56,10 @@ class Reading:
     before: Match | None     # 候補の直前に読まれた句 (前の歌の下の句のはず)
     after_text: str = ""
     before_text: str = ""
-    confirmed: bool | None = None  # 次の読みの前の下の句が同じ歌か。確かめようがなければ None
+    # 以下は resolve_readings が前後の候補と合わせて決める
+    poem: int | None = None        # この候補で上の句が読まれた歌
+    source: str | None = None      # poem の根拠。"kami" (直後の上の句) / "shimo" (次の読みの前の下の句)
+    confirmed: bool | None = None  # 直後の上の句と次の読みの前の下の句が同じ歌か。確かめようがなければ None
     next_shimo: int | None = None  # 次の読みの前に読まれた下の句の歌
 
 
@@ -120,52 +128,89 @@ def poem_label(poem: int) -> str:
     return f"序歌 {first}" if no == 0 else f"{no} {first}"
 
 
-def confirm_by_next_shimo(readings: list[Reading]) -> list[Reading]:
-    """上の句と特定した読みを、その次の読みの前にある下の句で確かめる。
+def _starts_kami(reading: Reading) -> bool:
+    """この候補で上の句が読み始められたか。
 
-    競技かるたでは、上の句のあと (取りと札の整理を待って) 同じ歌の下の句を読み、
-    続けて次の歌の上の句を読む。途中の候補 (雑音など) は飛ばし、次の読みの前の下の句と比べる。
-    次の読みの前の下の句が聞き取れなければ、その先の読みの下の句は別の歌なので確かめない。
-    食い違うのは、どちらかの特定の誤りか、間の読みが候補になっていないとき。
+    直後が上の句と聞こえたときのほか、直前に下の句が読まれていれば上の句の読み始めとみなす。
+    読みは「前の歌の下の句 → 間 → 次の歌の上の句」の順なので、下の句の直後は上の句になる。
+    直後の上の句は取りの札音に重なって聞き取れないことが多いので、直前の下の句を手がかりにする。
+    ただし前後とも同じ歌の下の句なら、下の句の途中 (読み直しなど) に付いた候補とみなす。
+    """
+    after, before = reading.after, reading.before
+    if after is not None and after.part == "kami":
+        return True
+    if before is None or before.part != "shimo":
+        return False
+    return not (after is not None and after.part == "shimo" and after.poem == before.poem)
+
+
+def _next_shimo(readings: list[Reading], i: int) -> Match | None:
+    """i 番目の読みのあとに読まれた下の句 (次の読みの前、または下の句の読み始めに付いた候補)。"""
+    for later in readings[i + 1:]:
+        if later.before is not None and later.before.part == "shimo":
+            return later.before
+        if _starts_kami(later):
+            return None  # 次の読みの前の下の句が聞き取れなかった。その先は別の歌なので見ない
+        if later.after is not None and later.after.part == "shimo":
+            return later.after
+    return None
+
+
+def resolve_readings(readings: list[Reading]) -> list[Reading]:
+    """前後の候補と合わせて、各候補で読まれた歌を決める。
+
+    競技かるたでは、上の句のあと (取りと札の整理を待って) 同じ歌の下の句を読み、続けて次の歌の
+    上の句を読む。そこで、直後の上の句の特定を、次の読みの前の下の句で確かめる。下の句は札が
+    落ち着いてから読むので、取りの音に重なる上の句より聞き取りやすい。
+    両者が食い違ったら、上の句がはっきり聞き取れていれば (CLEAR_KAMI_COST 以下) 上の句を採り、
+    間の読みが候補になっていないとみなす (2026-09-20 第4試合の 33 → 64 → 20)。そうでなければ
+    書き起こしとの食い違いが小さいほうを採る。
     """
     result = []
     for i, reading in enumerate(readings):
-        confirmed = next_shimo = None
-        if reading.after is not None and reading.after.part == "kami":
-            for later in readings[i + 1:]:
-                if later.before is not None and later.before.part == "shimo":
-                    next_shimo = later.before.poem
-                    confirmed = next_shimo == reading.after.poem
-                    break
-                if later.after is not None and later.after.part == "kami":
-                    break
-        result.append(replace(reading, confirmed=confirmed, next_shimo=next_shimo))
+        poem = source = confirmed = next_shimo = None
+        if _starts_kami(reading):
+            kami = reading.after if reading.after is not None and reading.after.part == "kami" else None
+            shimo = _next_shimo(readings, i)
+            next_shimo = shimo.poem if shimo is not None else None
+            if kami is not None and shimo is not None:
+                confirmed = kami.poem == shimo.poem
+            if kami is not None and (
+                shimo is None or confirmed or kami.cost <= CLEAR_KAMI_COST or kami.cost <= shimo.cost
+            ):
+                poem, source = kami.poem, "kami"
+            elif shimo is not None:
+                poem, source = shimo.poem, "shimo"
+        result.append(replace(reading, poem=poem, source=source, confirmed=confirmed, next_shimo=next_shimo))
     return result
 
 
 def describe_reading(reading: Reading) -> str:
     """レビュー画面に出す、候補で読まれた歌の説明。"""
-    after = reading.after
-    if after is None:
-        return "特定できませんでした"
-    if after.part == "shimo":
-        return f"{poem_label(after.poem)} の下の句の読み始めのようです（取りの場面ではない可能性があります）"
-    text = f"{poem_label(after.poem)}（上の句"
-    if reading.confirmed:
-        return text + "、次の下の句でも一致）"
-    if reading.confirmed is False:
-        return (text + f"）。次の読みの前の下の句は {poem_label(reading.next_shimo)} でした。"
-                "間の読みが候補になっていないか、どちらかの特定の誤りです")
-    return text + "）"
+    if reading.source == "shimo":
+        return f"{poem_label(reading.poem)}（次の読みの前の下の句から推定）"
+    if reading.source == "kami":
+        text = f"{poem_label(reading.poem)}（上の句"
+        if reading.confirmed:
+            return text + "、次の下の句でも一致）"
+        if reading.confirmed is False:
+            return (text + f"）。次の読みの前の下の句は {poem_label(reading.next_shimo)} でした。"
+                    "間の読みが候補になっていないか、どちらかの特定の誤りです")
+        return text + "）"
+    if _starts_kami(reading):
+        return "特定できませんでした（直前に下の句が読まれているので、読みの場面と考えられます）"
+    if reading.after is not None and reading.after.part == "shimo":
+        return f"{poem_label(reading.after.poem)} の下の句の読み始めのようです（取りの場面ではない可能性があります）"
+    return "特定できませんでした"
 
 
 def short_label(reading: Reading) -> str:
     """全シーン一覧に添える短い名前。"""
-    if reading.after is None:
-        return ""
-    if reading.after.part == "shimo":
+    if reading.poem is not None:
+        return POEMS[reading.poem][1].split()[0]
+    if not _starts_kami(reading) and reading.after is not None and reading.after.part == "shimo":
         return "(下の句)"
-    return POEMS[reading.after.poem][1].split()[0]
+    return ""
 
 
 def identify_readings(wav_path: str, onsets_sec: list[float], recognizer, progress=None) -> list[Reading]:
@@ -196,7 +241,7 @@ def identify_readings(wav_path: str, onsets_sec: list[float], recognizer, progre
             ))
             if progress is not None:
                 progress(k + 1, len(onsets_sec))
-    return confirm_by_next_shimo(readings)
+    return resolve_readings(readings)
 
 
 def model_cache_dir() -> str:

@@ -9,11 +9,11 @@ from hyakunin_isshu import POEMS
 from poem_id import (
     Match,
     Reading,
-    confirm_by_next_shimo,
     describe_reading,
     identify_readings,
     match_phrase,
     poem_label,
+    resolve_readings,
     short_label,
     to_kana,
 )
@@ -80,45 +80,108 @@ def test_label_shows_number_and_first_phrase_in_traditional_kana():
     assert poem_label(0) == "序歌 なにはづに"
 
 
-def _reading(onset, kami=None, shimo=None):
-    return Reading(
-        onset_sec=onset,
-        after=Match(kami, "kami", 0.1, 0.5) if kami is not None else None,
-        before=Match(shimo, "shimo", 0.1, 0.5) if shimo is not None else None,
-    )
+def _reading(onset, kami=None, shimo=None, after_shimo=None, kami_cost=0.1, shimo_cost=0.1):
+    if kami is not None:
+        after = Match(kami, "kami", kami_cost, 0.5)
+    elif after_shimo is not None:
+        after = Match(after_shimo, "shimo", 0.3, 0.5)
+    else:
+        after = None
+    before = Match(shimo, "shimo", shimo_cost, 0.5) if shimo is not None else None
+    return Reading(onset_sec=onset, after=after, before=before)
 
 
 def test_kami_is_confirmed_when_next_reading_starts_after_its_shimo():
-    readings = confirm_by_next_shimo([
+    readings = resolve_readings([
         _reading(100, kami=3),
         _reading(120, kami=37, shimo=3),
     ])
-    assert readings[0].confirmed is True
+    assert (readings[0].poem, readings[0].source, readings[0].confirmed) == (3, "kami", True)
     assert readings[1].confirmed is None  # 次の読みがないので確かめられない
 
 
-def test_kami_is_not_confirmed_when_next_shimo_is_another_poem():
-    readings = confirm_by_next_shimo([
-        _reading(100, kami=3),
-        _reading(120, kami=37, shimo=80),
+def test_kami_is_kept_when_next_shimo_differs_but_fits_worse():
+    # 2026-09-20 第4試合: 33 の次の 64 が候補にならず、次の候補の前で 64 の下の句が読まれていた
+    readings = resolve_readings([
+        _reading(486, kami=33, kami_cost=0.176),
+        _reading(558, kami=20, shimo=64, shimo_cost=0.214),
     ])
+    assert (readings[0].poem, readings[0].source) == (33, "kami")
     assert readings[0].confirmed is False
-    assert readings[0].next_shimo == 80
+    assert readings[0].next_shimo == 64
+
+
+def test_clear_kami_is_kept_even_if_next_shimo_fits_slightly_better():
+    # 2026-09-20 第5試合 #56: 上の句ははっきり 90。次の下の句 95 との食い違いは間の読みの見逃しと考えられる
+    readings = resolve_readings([
+        _reading(1700, kami=90, kami_cost=0.294),
+        _reading(1744, kami=75, shimo=95, shimo_cost=0.286),
+    ])
+    assert (readings[0].poem, readings[0].source, readings[0].confirmed) == (90, "kami", False)
+
+
+def test_next_shimo_wins_when_it_fits_better_than_kami():
+    # IMG_0091 #54: 上の句「心にとまければ」は 43 に近かったが、次の下の句は 68 で、こちらが正しかった
+    readings = resolve_readings([
+        _reading(2049, kami=43, shimo=44, kami_cost=0.647),
+        _reading(2076, shimo=68, shimo_cost=0.5),
+    ])
+    assert (readings[0].poem, readings[0].source) == (68, "shimo")
+
+
+def test_poem_is_inferred_from_next_shimo_when_kami_is_not_heard():
+    # IMG_0091 #4: 上の句は取りの音に埋もれて「大きな」だけ。次の読みの前の下の句で 95 と分かる
+    readings = resolve_readings([
+        _reading(151, shimo=38),
+        _reading(188, shimo=95),
+    ])
+    assert (readings[0].poem, readings[0].source) == (95, "shimo")
+
+
+def test_candidate_right_after_shimo_is_a_kami_start_even_if_it_sounds_like_shimo():
+    # IMG_0091 #18: 読みは「下の句 → 間 → 上の句」の順なので、下の句の直後が下の句であることはない
+    readings = resolve_readings([
+        _reading(679, shimo=9, after_shimo=34),
+        _reading(699, kami=53, shimo=99),
+    ])
+    assert (readings[0].poem, readings[0].source) == (99, "shimo")
+
+
+def test_candidate_inside_a_repeated_shimo_stays_a_shimo_start():
+    # 第4試合 2465.9 秒: 前後とも同じ歌の下の句。取りの場面ではない
+    readings = resolve_readings([
+        _reading(2440, kami=56),
+        _reading(2465, shimo=56, after_shimo=56),
+        _reading(2490, kami=76, shimo=56),
+    ])
+    assert readings[1].poem is None
+    assert readings[0].confirmed is True
+
+
+def test_shimo_start_candidate_confirms_the_previous_kami():
+    readings = resolve_readings([
+        _reading(560, kami=20),
+        _reading(574, after_shimo=20),
+        _reading(583, kami=63),
+    ])
+    assert readings[0].confirmed is True
+    assert readings[1].poem is None
 
 
 def test_confirmation_skips_candidates_without_shimo_before_them():
     # 途中の候補 (雑音など) の前に下の句が聞き取れなくても、その次の読みで確かめる
-    readings = confirm_by_next_shimo([
+    readings = resolve_readings([
         _reading(100, kami=93),
         _reading(120),
         _reading(154, kami=68, shimo=93),
     ])
     assert readings[0].confirmed is True
+    assert readings[1].poem is None
 
 
 def test_confirmation_is_unknown_when_next_reading_has_no_shimo_before_it():
     # 次の読み (上の句が特定できた候補) の前の下の句が聞き取れなければ、その先の読みでは確かめない
-    readings = confirm_by_next_shimo([
+    readings = resolve_readings([
         _reading(100, kami=81),
         _reading(130, kami=51),
         _reading(150, kami=72, shimo=51),
@@ -128,38 +191,64 @@ def test_confirmation_is_unknown_when_next_reading_has_no_shimo_before_it():
 
 
 def test_description_of_kami_confirmed_by_next_shimo():
-    [reading, _] = confirm_by_next_shimo([_reading(100, kami=17), _reading(120, kami=3, shimo=17)])
+    [reading, _] = resolve_readings([_reading(100, kami=17), _reading(120, kami=3, shimo=17)])
     assert describe_reading(reading) == "17 ちはやぶる（上の句、次の下の句でも一致）"
 
 
 def test_description_of_kami_that_could_not_be_checked():
-    assert describe_reading(_reading(100, kami=17)) == "17 ちはやぶる（上の句）"
+    [reading] = resolve_readings([_reading(100, kami=17)])
+    assert describe_reading(reading) == "17 ちはやぶる（上の句）"
 
 
 def test_description_suggests_missed_reading_when_next_shimo_differs():
-    # 2026-09-20 第4試合: 33 の次の 64 が候補にならず、次の候補の前で 64 の下の句が読まれていた
-    [reading, _] = confirm_by_next_shimo([_reading(100, kami=33), _reading(170, kami=20, shimo=64)])
+    [reading, _] = resolve_readings([
+        _reading(486, kami=33, kami_cost=0.176),
+        _reading(558, kami=20, shimo=64, shimo_cost=0.214),
+    ])
     text = describe_reading(reading)
     assert text.startswith("33 ひさかたの（上の句）")
     assert "64 あさぼらけ" in text
     assert "候補" in text
 
 
+def test_description_of_poem_inferred_from_next_shimo():
+    [reading, _] = resolve_readings([_reading(151, shimo=38), _reading(188, shimo=95)])
+    assert describe_reading(reading) == "95 おほけなく（次の読みの前の下の句から推定）"
+
+
 def test_description_of_shimo_warns_it_may_not_be_a_take():
-    text = describe_reading(Reading(100, after=Match(20, "shimo", 0.2, 0.3), before=None))
+    [reading] = resolve_readings([_reading(574, after_shimo=20)])
+    text = describe_reading(reading)
     assert "20 わびぬれば" in text
     assert "下の句" in text
     assert "取り" in text
 
 
+def test_description_of_reading_whose_poem_is_unknown():
+    # 直前に下の句があるので読みの場面だが、次の下の句もない (試合の最後など)
+    [reading] = resolve_readings([_reading(4118, shimo=40)])
+    text = describe_reading(reading)
+    assert text.startswith("特定できませんでした")
+    assert "読み" in text
+
+
 def test_description_when_nothing_is_identified():
-    assert describe_reading(Reading(100, after=None, before=None)) == "特定できませんでした"
+    [reading] = resolve_readings([_reading(100)])
+    assert describe_reading(reading) == "特定できませんでした"
 
 
 def test_short_label_for_scene_list():
-    assert short_label(_reading(100, kami=17)) == "ちはやぶる"
-    assert short_label(Reading(100, after=Match(20, "shimo", 0.2, 0.3), before=None)) == "(下の句)"
-    assert short_label(Reading(100, after=None, before=None)) == ""
+    kami, shimo_start, inferred, _, nothing = resolve_readings([
+        _reading(100, kami=17),
+        _reading(110, after_shimo=17),
+        _reading(150, shimo=17),
+        _reading(170, shimo=95),
+        _reading(200),
+    ])
+    assert short_label(kami) == "ちはやぶる"
+    assert short_label(shimo_start) == "(下の句)"
+    assert short_label(inferred) == "おほけなく"
+    assert short_label(nothing) == ""
 
 
 class _FakeRecognizer:
