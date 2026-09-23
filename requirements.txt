@@ -7,3 +7,5 @@ moviepy
 ffmpeg-python
 matplotlib
 tqdm
+sherpa-onnx
+pykakasi
