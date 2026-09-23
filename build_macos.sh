@@ -9,8 +9,8 @@
 #      ./build_macos.sh
 #
 #  完成物: dist/karuta-edit.app
-#  配布: dist/karuta-edit.app を zip にして渡す。
-#        受け取った人は初回のみ「右クリック → 開く」で起動する。
+#  配布: GitHub の Release ワークフロー (.github/workflows/release.yml) で作る。
+#        初めて開くときの手順は packaging/macos/ご一読ください.html にある。
 # ============================================================
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -39,7 +39,8 @@ echo "      使用Python: $PYX"
 echo "[3/5] ビルド用 venv を作成し依存をインストールします..."
 "$PYX" -m venv "$BUILD_VENV"
 "$BUILD_VENV/bin/python" -m pip install --upgrade pip
-"$BUILD_VENV/bin/python" -m pip install -r requirements.txt pyinstaller
+# 版は constraints-build.txt で、開発環境で確かめた版に固定する
+"$BUILD_VENV/bin/python" -m pip install -r requirements.txt -c constraints-build.txt pyinstaller
 
 echo "[4/5] arm64 版 ffmpeg / ffprobe を用意します (未取得なら DL)..."
 mkdir -p ffmpeg
@@ -60,5 +61,4 @@ echo "[5/5] .app をビルドします (数分かかります)..."
 echo ""
 echo "完了です。"
 echo "  出来上がり: dist/karuta-edit.app"
-echo "  配布する場合は dist/karuta-edit.app を zip にしてください。"
-echo "  受け取った人は初回だけ「右クリック → 開く」で起動します。"
+echo "  配布用の zip は、GitHub の Release ワークフローで作ります。"

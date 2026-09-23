@@ -21,8 +21,8 @@ if not exist ".venv_build" (
 echo [2/4] 依存パッケージと PyInstaller をインストールします...
 call .venv_build\Scripts\activate.bat
 python -m pip install --upgrade pip
-pip install -r requirements.txt
-pip install pyinstaller
+REM 版は constraints-build.txt で、開発環境で確かめた版に固定する
+pip install -r requirements.txt -c constraints-build.txt pyinstaller
 
 echo [3/4] exe をビルドします（数分かかります）...
 pyinstaller karuta_edit.spec --noconfirm
