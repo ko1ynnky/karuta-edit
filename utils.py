@@ -5,6 +5,8 @@ import os
 from tqdm import tqdm
 import time
 
+from reader_voice import find_reading_onsets
+
 
 
 
@@ -108,6 +110,30 @@ def return_top_scores(waveform, top_n=125):
                         break
             
     return scores, score_dict
+
+
+# 読手の声から見つけた上の句開始を候補とし、振幅スコアは位置合わせと表示用スコアに使う
+# 振幅スコアの候補は雑音の多い録音では読みの途中や下の句の開始にも付くため、
+# 声の立ち上がりに一致しないものは採用しない。声の立ち上がりが一つも取れない
+# 録音 (読手が遠いなど) では従来どおり振幅スコアの候補をそのまま返す。
+def return_candidates(waveform, voiced, top_n=125, merge_frames=15):
+    _, legacy = return_top_scores(waveform, top_n=top_n)
+    if voiced is None:
+        return legacy
+    onsets = find_reading_onsets(voiced)
+    if not onsets:
+        return legacy
+    raw_scores = return_raw_scores(waveform)
+    candidates = {}
+    for onset in onsets:
+        near = [idx for idx in legacy if abs(idx - onset) <= merge_frames]
+        if near:
+            idx = min(near, key=lambda i: abs(i - onset))
+            candidates[idx] = legacy[idx]
+        else:
+            nearby = raw_scores[max(0, onset - 5):onset + 6]
+            candidates[onset] = max(1, int(nearby.max() * 10000)) if len(nearby) else 1
+    return dict(sorted(candidates.items()))
 
 
 

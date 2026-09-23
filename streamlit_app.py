@@ -8,7 +8,8 @@ import subprocess
 import sys
 import tempfile
 import os
-from utils import return_top_scores
+from reader_voice import compute_voiced_frames
+from utils import return_candidates
 from offline_app import (
     extract_audio,
     simplify_waveform,
@@ -205,6 +206,26 @@ st.session_state.setdefault("uploader_gen", 0)
 
 SUPPORTED_EXTS = [".mp4", ".mov", ".webm", ".mkv"]
 
+# 既定オフ: 読手の声の検出は空調などの雑音に強いが、読手が遠い・声が混ざるといった
+# 録音では声が取れず候補を落とし得る。静かな会場では従来の音量パターンで十分なので、
+# 雑音で誤候補が多いときだけ使う選択式にしている。
+# (session_state の初期化より後に置かないと、初回実行でウィジェットのキーが消される)
+use_reader_voice = st.checkbox(
+    "読手の声で候補を絞る（雑音の多い動画向け）",
+    value=False,
+    key="use_reader_voice",
+    disabled=st.session_state.state != 1,
+    help=(
+        "空調などの雑音が大きく、取りではない場面（札を払う音・札を並べる音だけの区間）が"
+        "候補に多く混ざるときにオンにしてください。\n\n"
+        "オンにすると、音声から読手の声を検出し、下の句の後に上の句が読み始められた位置だけを"
+        "候補にします。雑音に埋もれて見逃していた読み始めも拾えるようになります。\n\n"
+        "読手の声が小さく録れている動画では、かえって本物の取りを落とすことがあります。"
+        "静かな会場で撮った動画ではオフ（音量パターンのみで検出）のままで十分です。"
+    ),
+)
+
+
 # file uploader
 # key を世代管理し、コピー完了後に世代を進めることで
 # Streamlit がメモリ上に保持するアップロードデータを解放する
@@ -278,7 +299,8 @@ if st.session_state.state == 1 and input_video_path is not None:
     simplify_waveform(audio_path, simplified_waveform_path)
 
     waveform = np.load(simplified_waveform_path)
-    _, score_dict = return_top_scores(waveform)
+    voiced = compute_voiced_frames(audio_path) if use_reader_voice else None
+    score_dict = return_candidates(waveform, voiced)
     sorted_scores = sorted(score_dict.items(), key=lambda x: x[0])
 
     st.session_state.update({
