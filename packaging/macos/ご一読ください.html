@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ご一読ください｜かるた動画の短縮 macOS 版</title>
+<style>
+:root {
+  --paper: #F2F3EE;
+  --card: #FFFFFF;
+  --ink: #1F231E;
+  --muted: #535A50;
+  --line: #D5D8CC;
+  --green: #213A2F;
+  --tint: #E4E6DC;
+  --vermilion: #B8321F;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #171A16;
+    --card: #20241F;
+    --ink: #E9EBE4;
+    --muted: #A9AFA4;
+    --line: #3A4037;
+    --green: #9CC3AC;
+    --tint: #2A3028;
+    --vermilion: #F08A76;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Yu Gothic", "Meiryo", sans-serif;
+  font-size: 16px;
+  line-height: 1.85;
+}
+main { max-width: 760px; margin: 0 auto; padding: 48px 20px 80px; }
+header { border-bottom: 2px solid var(--green); padding-bottom: 20px; margin-bottom: 28px; }
+.app { color: var(--green); font-weight: 700; letter-spacing: .06em; margin: 0; }
+h1 { font-size: 1.9rem; line-height: 1.4; margin: 6px 0 10px; }
+.lead { margin: 0; color: var(--muted); }
+h2 { font-size: 1.3rem; margin: 48px 0 12px; padding-top: 8px; color: var(--green); }
+h3 { font-size: 1.05rem; margin: 24px 0 8px; }
+p { margin: 10px 0; }
+a { color: var(--green); }
+code, kbd {
+  font-family: "SF Mono", Menlo, Consolas, monospace;
+  font-size: .92em;
+  background: var(--tint);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+nav { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px 20px; }
+nav ol { margin: 0; padding-left: 1.4em; }
+.facts { display: grid; grid-template-columns: max-content 1fr; gap: 6px 18px; margin: 18px 0 0; }
+.facts dt { color: var(--muted); }
+.facts dd { margin: 0; }
+ol.steps { list-style: none; counter-reset: step; padding: 0; margin: 16px 0; }
+ol.steps > li { counter-increment: step; position: relative; padding: 0 0 8px 48px; }
+ol.steps > li > p:first-child { margin-top: 2px; }
+ol.steps > li::before {
+  content: counter(step);
+  position: absolute; left: 0; top: 2px;
+  width: 30px; height: 30px; border-radius: 50%;
+  background: var(--green); color: var(--paper);
+  display: flex; align-items: center; justify-content: center;
+  font-weight: 700; font-size: .95rem;
+}
+.dialog {
+  margin: 12px 0 6px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 16px 18px;
+  max-width: 460px;
+  box-shadow: 0 1px 0 var(--line);
+}
+.dialog .title { font-weight: 700; margin: 0 0 4px; }
+.dialog .body { font-size: .9rem; color: var(--muted); margin: 0 0 12px; }
+.dialog .buttons { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
+.btn { border: 1px solid var(--line); border-radius: 7px; padding: 2px 14px; font-size: .9rem; background: var(--paper); }
+.btn.press { border: 2px solid var(--vermilion); font-weight: 700; }
+.note { font-size: .9rem; color: var(--muted); }
+.warn {
+  border-left: 4px solid var(--vermilion);
+  background: var(--card);
+  padding: 12px 16px;
+  border-radius: 0 8px 8px 0;
+  margin: 16px 0;
+}
+.warn strong { color: var(--vermilion); }
+pre {
+  background: var(--tint);
+  border-radius: 8px;
+  padding: 12px 14px;
+  overflow-x: auto;
+  font-size: .9rem;
+}
+table { border-collapse: collapse; width: 100%; font-size: .92rem; margin: 12px 0; }
+th, td { border-bottom: 1px solid var(--line); text-align: left; padding: 8px 10px 8px 0; vertical-align: top; }
+th { color: var(--muted); font-weight: 400; }
+footer { margin-top: 56px; border-top: 1px solid var(--line); padding-top: 16px; font-size: .88rem; color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+<header>
+  <p class="app">かるた動画の短縮（karuta-edit）　macOS 版 {{VERSION}}</p>
+  <h1>はじめて使う前に、ご一読ください</h1>
+  <p class="lead">このアプリは Apple の有料の開発者登録（署名と公証）をしていないため、初めて開くときに macOS の警告が出ます。下の手順で開いてください。2回目からは、ダブルクリックだけで開けます。</p>
+  <dl class="facts">
+    <dt>使える Mac</dt><dd>Apple シリコン（M1 以降）の Mac。Intel の Mac では動きません</dd>
+    <dt>インターネット</dt><dd>初めて「読まれた歌の聞き分け」を使うときだけ、音声認識のデータ（約630 MB）をダウンロードします</dd>
+  </dl>
+</header>
+
+<nav aria-label="目次">
+  <ol>
+    <li><a href="#open-zip">zip を開く</a></li>
+    <li><a href="#first-launch">初めて開く（警告が出たとき）</a></li>
+    <li><a href="#folder-access">動画のフォルダへのアクセスを許可する</a></li>
+    <li><a href="#usage">使いかた</a></li>
+    <li><a href="#quit">終わりかた</a></li>
+    <li><a href="#trouble">困ったとき</a></li>
+    <li><a href="#remove">削除するとき</a></li>
+    <li><a href="#licenses">同梱しているソフトウェア</a></li>
+  </ol>
+</nav>
+
+<h2 id="open-zip">1. zip を開く</h2>
+<p>ダウンロードした zip をダブルクリックすると、「karuta-edit」フォルダができます。中の <strong>karuta-edit.app</strong> がアプリです。</p>
+<p>karuta-edit.app を「アプリケーション」フォルダに移しておくと、あとで探しやすくなります（移さなくても使えます）。</p>
+
+<h2 id="first-launch">2. 初めて開く（警告が出たとき）</h2>
+<ol class="steps">
+  <li>
+    <p>karuta-edit.app をダブルクリックします。次のような表示が出たら、<strong>「完了」</strong>を押して閉じます。「ゴミ箱に入れる」は押さないでください。</p>
+    <div class="dialog" role="img" aria-label="警告の例：karuta-edit は開いていません">
+      <p class="title">“karuta-edit”は開いていません</p>
+      <p class="body">Apple は、“karuta-edit”に Mac に損害を与えたり、プライバシーを侵害する可能性のあるマルウェアが含まれていないことを検証できませんでした。</p>
+      <div class="buttons"><span class="btn">ゴミ箱に入れる</span><span class="btn press">完了</span></div>
+    </div>
+    <p class="note">文言は macOS の版によって少し違います。</p>
+  </li>
+  <li>
+    <p>画面左上の Apple メニューから<strong>「システム設定」</strong>を開き、<strong>「プライバシーとセキュリティ」</strong>を選びます。</p>
+  </li>
+  <li>
+    <p>右側を下までスクロールすると、「セキュリティ」の欄に karuta-edit がブロックされたことが出ています。その横の<strong>「このまま開く」</strong>を押します。</p>
+    <p class="note">この表示は、手順1のあと1時間ほどで消えます。見当たらないときは、もう一度手順1からやり直してください。</p>
+  </li>
+  <li>
+    <p>もう一度確認が出るので、<strong>「このまま開く」</strong>を押し、Mac のパスワード（または Touch ID）を入れます。</p>
+  </li>
+</ol>
+<p>これで開きます。次からは、karuta-edit.app をダブルクリックするだけで開けます。</p>
+<div class="warn">
+  <p><strong>「右クリック →『開く』」では開けません。</strong>以前の macOS ではこの方法で開けましたが、macOS 15 以降は上の手順が必要です。</p>
+</div>
+
+<h3>「“karuta-edit”は壊れているため開けません」と出たとき</h3>
+<p>ダウンロードの仕方によっては、上の手順の代わりにこの表示が出ることがあります。そのときは「ターミナル」（アプリケーション → ユーティリティ）を開き、次の文字を入れてから、karuta-edit.app をターミナルの画面にドラッグして、<kbd>return</kbd> を押します。</p>
+<pre>xattr -dr com.apple.quarantine </pre>
+<p class="note">末尾の空白のあとに、karuta-edit.app の場所が入ります。実行したあとは、ダブルクリックで開けます。</p>
+
+<h2 id="folder-access">3. 動画のフォルダへのアクセスを許可する</h2>
+<p>「ダウンロード」「デスクトップ」「書類」フォルダにある動画を初めて選ぶと、次のような確認が出ます。<strong>「許可」</strong>を押してください。</p>
+<div class="dialog" role="img" aria-label="確認の例：karuta-edit がダウンロードフォルダ内のファイルにアクセスしようとしています">
+  <p class="title">“karuta-edit”から“ダウンロード”フォルダ内のファイルにアクセスしようとしています。</p>
+  <div class="buttons"><span class="btn">許可しない</span><span class="btn press">許可</span></div>
+</div>
+<p class="note">文言は macOS の版によって少し違います。</p>
+<p>確認はフォルダごとに1回だけ出ます。この確認に答えるまで、アプリは動画を読めず、画面が「動画を選ぶ」のまま進みません。ほかのウィンドウの後ろに隠れていることがあります。</p>
+<h3>「許可しない」を押してしまったとき</h3>
+<p>「システム設定」→「プライバシーとセキュリティ」→<strong>「ファイルとフォルダ」</strong>を開き、karuta-edit の下にある、そのフォルダのスイッチをオンにします。</p>
+<p class="note">新しい版の karuta-edit に入れ替えたときは、もう一度確認が出ることがあります。</p>
+
+<h2 id="usage">4. 使いかた</h2>
+<p>karuta-edit.app を開くと、しばらくしてブラウザ（Safari や Chrome など、いつも使っているもの）で「かるた動画の短縮」の画面が開きます。</p>
+<ol class="steps">
+  <li><p><strong>動画を選ぶ</strong>：「ファイルを選択...」で試合の動画を選び、「解析を始める」を押します。</p></li>
+  <li><p><strong>解析</strong>：読みの場面を探し、読まれた歌を聞き分けます。1時間ほどの試合で数分かかります。</p></li>
+  <li><p><strong>確認</strong>：歌が分からなかった場面だけ、残すか外すかを選びます。確かめずに進んでもかまいません。</p></li>
+  <li><p><strong>書き出し</strong>：「短縮版を作る」で短縮版を作り、「保存する」で保存します。保存先は、ブラウザのダウンロード先（ふつうは「ダウンロード」フォルダ）です。</p></li>
+</ol>
+<p>初めて歌の聞き分けを使うときは、音声認識のデータ（約630 MB）のダウンロードに数分かかります。2回目からは要りません。インターネットにつながらないときは、「詳細設定」の「読まれた歌を特定する」をオフにすれば、聞き分けなしで短縮版を作れます。</p>
+
+<h2 id="quit">5. 終わりかた</h2>
+<p>macOS 版は、Dock にもメニューバーにも出ず、裏で動きます。<strong>ブラウザのタブを閉じても終わりません。</strong>終わるときは、次のようにします。</p>
+<ol class="steps">
+  <li><p>「アクティビティモニタ」（アプリケーション → ユーティリティ）を開きます。</p></li>
+  <li><p>一覧から <strong>karuta-edit</strong> を選び、上の <strong>⊗</strong> ボタンを押して<strong>「終了」</strong>を選びます。</p></li>
+  <li><p>しばらくしても一覧から消えないときは、もう一度 ⊗ ボタンを押して<strong>「強制終了」</strong>を選びます。保存していない短縮版は消えるので、保存してから終わらせてください。</p></li>
+</ol>
+<p>Mac を再起動したりログアウトしたりしても終わります。動いたまま karuta-edit.app をもう一度開くと、2つ目が動き、ブラウザに新しいタブが開きます。</p>
+
+<h2 id="trouble">6. 困ったとき</h2>
+<table>
+  <tr><th scope="row">ブラウザの画面が開かない</th><td>ブラウザで <code>http://localhost:8501</code> を開いてください。karuta-edit を2つ以上動かしているときは、<code>8502</code>、<code>8503</code> と番号が増えます。</td></tr>
+  <tr><th scope="row">動画を選んでも進まない</th><td>フォルダへのアクセスの確認（<a href="#folder-access">3</a>）が、ほかのウィンドウの後ろに出ていないか確かめてください。</td></tr>
+  <tr><th scope="row">歌の聞き分けができなかったと出る</th><td>インターネットにつながっているか確かめてください。つながらないときは、「詳細設定」で「読まれた歌を特定する」をオフにして進められます。</td></tr>
+  <tr><th scope="row">保存した短縮版が見つからない</th><td>ブラウザのダウンロードの一覧を開いてください。「保存する」は何度でも押せます。</td></tr>
+</table>
+
+<h2 id="remove">7. 削除するとき</h2>
+<p>karuta-edit.app をゴミ箱に入れます。音声認識のデータ（約630 MB）も消すときは、Finder の「移動」→「フォルダへ移動...」で <code>~/Library/Caches/karuta-edit</code> を開き、そのフォルダをゴミ箱に入れます。</p>
+
+<h2 id="licenses">8. 同梱しているソフトウェア</h2>
+<p>このアプリには、次のソフトウェアが入っています。ライセンスの全文は、同じフォルダの「licenses」にあります。</p>
+<table>
+  <tr><th scope="col">ソフトウェア</th><th scope="col">ライセンス</th><th scope="col">入手元</th></tr>
+  <tr><td>FFmpeg（動画の読み書き）</td><td>GNU GPL v2 以降</td><td><a href="https://ffmpeg.org/">ffmpeg.org</a>（macOS 用のビルドは <a href="https://www.osxexperts.net/">osxexperts.net</a>）</td></tr>
+  <tr><td>Yuji Syuku（札の筆文字。ひらがなだけを切り出して使用）</td><td>SIL Open Font License 1.1</td><td><a href="https://github.com/Kinutafontfactory/Yuji">Kinuta Font Factory</a></td></tr>
+  <tr><td>Streamlit、NumPy、pandas、sherpa-onnx、pykakasi などの Python ライブラリ</td><td>それぞれのライセンス</td><td>PyPI</td></tr>
+</table>
+<p class="note">初回に取得する音声認識のデータは、<a href="https://github.com/k2-fsa/sherpa-onnx">sherpa-onnx</a> が配布しているものです（アプリには入っていません）。</p>
+
+<footer>
+  <p>新しい版と、これまでの版の一覧：<a href="https://github.com/{{REPOSITORY}}/releases">https://github.com/{{REPOSITORY}}/releases</a></p>
+</footer>
+</main>
+</body>
+</html>

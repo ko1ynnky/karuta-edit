@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ご一読ください｜かるた動画の短縮 Windows 版</title>
+<style>
+:root {
+  --paper: #F2F3EE;
+  --card: #FFFFFF;
+  --ink: #1F231E;
+  --muted: #535A50;
+  --line: #D5D8CC;
+  --green: #213A2F;
+  --tint: #E4E6DC;
+  --vermilion: #B8321F;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #171A16;
+    --card: #20241F;
+    --ink: #E9EBE4;
+    --muted: #A9AFA4;
+    --line: #3A4037;
+    --green: #9CC3AC;
+    --tint: #2A3028;
+    --vermilion: #F08A76;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: "Yu Gothic UI", "Yu Gothic", "Meiryo", "Hiragino Sans", sans-serif;
+  font-size: 16px;
+  line-height: 1.85;
+}
+main { max-width: 760px; margin: 0 auto; padding: 48px 20px 80px; }
+header { border-bottom: 2px solid var(--green); padding-bottom: 20px; margin-bottom: 28px; }
+.app { color: var(--green); font-weight: 700; letter-spacing: .06em; margin: 0; }
+h1 { font-size: 1.9rem; line-height: 1.4; margin: 6px 0 10px; }
+.lead { margin: 0; color: var(--muted); }
+h2 { font-size: 1.3rem; margin: 48px 0 12px; padding-top: 8px; color: var(--green); }
+h3 { font-size: 1.05rem; margin: 24px 0 8px; }
+p { margin: 10px 0; }
+a { color: var(--green); }
+code, kbd {
+  font-family: Consolas, "BIZ UDGothic", monospace;
+  font-size: .92em;
+  background: var(--tint);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+nav { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px 20px; }
+nav ol { margin: 0; padding-left: 1.4em; }
+.facts { display: grid; grid-template-columns: max-content 1fr; gap: 6px 18px; margin: 18px 0 0; }
+.facts dt { color: var(--muted); }
+.facts dd { margin: 0; }
+ol.steps { list-style: none; counter-reset: step; padding: 0; margin: 16px 0; }
+ol.steps > li { counter-increment: step; position: relative; padding: 0 0 8px 48px; }
+ol.steps > li > p:first-child { margin-top: 2px; }
+ol.steps > li::before {
+  content: counter(step);
+  position: absolute; left: 0; top: 2px;
+  width: 30px; height: 30px; border-radius: 50%;
+  background: var(--green); color: var(--paper);
+  display: flex; align-items: center; justify-content: center;
+  font-weight: 700; font-size: .95rem;
+}
+.dialog {
+  margin: 12px 0 6px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 16px 18px;
+  max-width: 460px;
+  box-shadow: 0 1px 0 var(--line);
+}
+.dialog .title { font-weight: 700; margin: 0 0 4px; }
+.dialog .body { font-size: .9rem; color: var(--muted); margin: 0 0 12px; }
+.dialog .buttons { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
+.btn { border: 1px solid var(--line); border-radius: 7px; padding: 2px 14px; font-size: .9rem; background: var(--paper); }
+.btn.press { border: 2px solid var(--vermilion); font-weight: 700; }
+.note { font-size: .9rem; color: var(--muted); }
+.warn {
+  border-left: 4px solid var(--vermilion);
+  background: var(--card);
+  padding: 12px 16px;
+  border-radius: 0 8px 8px 0;
+  margin: 16px 0;
+}
+.warn strong { color: var(--vermilion); }
+pre {
+  background: var(--tint);
+  border-radius: 8px;
+  padding: 12px 14px;
+  overflow-x: auto;
+  font-size: .9rem;
+}
+table { border-collapse: collapse; width: 100%; font-size: .92rem; margin: 12px 0; }
+th, td { border-bottom: 1px solid var(--line); text-align: left; padding: 8px 10px 8px 0; vertical-align: top; }
+th { color: var(--muted); font-weight: 400; }
+footer { margin-top: 56px; border-top: 1px solid var(--line); padding-top: 16px; font-size: .88rem; color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+<header>
+  <p class="app">かるた動画の短縮（karuta-edit）　Windows 版 {{VERSION}}</p>
+  <h1>はじめて使う前に、ご一読ください</h1>
+  <p class="lead">このアプリは、Microsoft に認められた発行元の署名（コード署名）をしていないため、初めて開くときに Windows の警告が出ます。下の手順で開いてください。2回目からは、ダブルクリックだけで開けます。</p>
+  <dl class="facts">
+    <dt>使えるパソコン</dt><dd>Windows 10 / 11（64 ビット）</dd>
+    <dt>インターネット</dt><dd>初めて「読まれた歌の聞き分け」を使うときだけ、音声認識のデータ（約630 MB）をダウンロードします</dd>
+  </dl>
+</header>
+
+<nav aria-label="目次">
+  <ol>
+    <li><a href="#open-zip">zip を展開する</a></li>
+    <li><a href="#first-launch">初めて開く（警告が出たとき）</a></li>
+    <li><a href="#firewall">ファイアウォールの確認が出たとき</a></li>
+    <li><a href="#usage">使いかた</a></li>
+    <li><a href="#quit">終わりかた</a></li>
+    <li><a href="#trouble">困ったとき</a></li>
+    <li><a href="#remove">削除するとき</a></li>
+    <li><a href="#licenses">同梱しているソフトウェア</a></li>
+  </ol>
+</nav>
+
+<h2 id="open-zip">1. zip を展開する</h2>
+<p>ダウンロードした zip を右クリックし、<strong>「すべて展開」</strong>を選びます。展開先は、デスクトップやドキュメントなど、わかりやすい場所にしてください。</p>
+<p>展開したフォルダの中の「karuta-edit」フォルダに、アプリの <strong>karuta-edit.exe</strong> と、動かすためのファイルが入った「_internal」フォルダがあります。この2つは同じフォルダに置いたまま使ってください。</p>
+<div class="warn">
+  <p><strong>zip を開いただけの状態で karuta-edit.exe をダブルクリックしても動きません。</strong>必ず「すべて展開」してから開いてください。</p>
+</div>
+
+<h2 id="first-launch">2. 初めて開く（警告が出たとき）</h2>
+<ol class="steps">
+  <li>
+    <p>karuta-edit.exe をダブルクリックします。次のような青い画面が出たら、<strong>「詳細情報」</strong>を押します。</p>
+    <div class="dialog" role="img" aria-label="警告の例：Windows によって PC が保護されました">
+      <p class="title">Windows によって PC が保護されました</p>
+      <p class="body">Microsoft Defender SmartScreen は認識されないアプリの起動を停止しました。このアプリを実行すると、PC に問題が起こる可能性があります。<br><span class="btn press">詳細情報</span></p>
+      <div class="buttons"><span class="btn">実行しない</span></div>
+    </div>
+  </li>
+  <li>
+    <p>「アプリ: karuta-edit.exe」「発行元: 不明な発行元」と出て、下に<strong>「実行」</strong>のボタンが現れます。「実行」を押します。</p>
+    <div class="dialog" role="img" aria-label="詳細情報を押したあと：実行ボタンが現れる">
+      <p class="body">アプリ: karuta-edit.exe<br>発行元: 不明な発行元</p>
+      <div class="buttons"><span class="btn press">実行</span><span class="btn">実行しない</span></div>
+    </div>
+    <p class="note">文言は Windows の版によって少し違います。</p>
+  </li>
+</ol>
+<p>これで開きます。次からは、karuta-edit.exe をダブルクリックするだけで開けます。</p>
+<p class="note">Windows 11 で「スマート アプリ コントロール」がオンになっていると、署名のないアプリはこの手順でも開けず、「ブロックされました」と出ます。オフにする方法はありますが、パソコン全体の守りが弱くなるため、配布した人に相談してください。</p>
+
+<h2 id="firewall">3. ファイアウォールの確認が出たとき</h2>
+<p>初めて開いたとき、「Windows セキュリティの重要な警告」として、karuta-edit の通信を許可するかを尋ねられることがあります。</p>
+<div class="dialog" role="img" aria-label="確認の例：Windows セキュリティの重要な警告">
+  <p class="title">Windows セキュリティの重要な警告</p>
+  <p class="body">このアプリの機能のいくつかが Windows Defender ファイアウォールでブロックされています</p>
+  <div class="buttons"><span class="btn">アクセスを許可する</span><span class="btn press">キャンセル</span></div>
+</div>
+<p class="note">文言は Windows の版によって少し違います（「Windows Defender ファイアウォール」が「Windows ファイアウォール」となっていることもあります）。</p>
+<p>このパソコンだけで使うなら、<strong>「キャンセル」</strong>で大丈夫です。スマートフォンなど、同じネットワークのほかの端末から画面を開いて使いたいときだけ、「プライベート ネットワーク」にチェックを入れて「アクセスを許可する」を押します。</p>
+
+<h2 id="usage">4. 使いかた</h2>
+<p>karuta-edit.exe を開くと、黒い画面（ログの画面）が開き、しばらくしてブラウザ（Edge や Chrome など、いつも使っているもの）で「かるた動画の短縮」の画面が開きます。<strong>黒い画面は、使い終わるまで閉じないでください。</strong>閉じるとアプリが終わります。</p>
+<ol class="steps">
+  <li><p><strong>動画を選ぶ</strong>：「ファイルを選択...」で試合の動画を選び、「解析を始める」を押します。ファイルを選ぶ画面は、ブラウザの後ろに開くことがあります。</p></li>
+  <li><p><strong>解析</strong>：読みの場面を探し、読まれた歌を聞き分けます。1時間ほどの試合で数分かかります。</p></li>
+  <li><p><strong>確認</strong>：歌が分からなかった場面だけ、残すか外すかを選びます。確かめずに進んでもかまいません。</p></li>
+  <li><p><strong>書き出し</strong>：「短縮版を作る」で短縮版を作り、「保存する」で保存します。保存先は、ブラウザのダウンロード先（ふつうは「ダウンロード」フォルダ）です。</p></li>
+</ol>
+<p>初めて歌の聞き分けを使うときは、音声認識のデータ（約630 MB）のダウンロードに数分かかります。2回目からは要りません。インターネットにつながらないときは、「詳細設定」の「読まれた歌を特定する」をオフにすれば、聞き分けなしで短縮版を作れます。</p>
+
+<h2 id="quit">5. 終わりかた</h2>
+<p>黒い画面を、右上の × で閉じます。ブラウザのタブを閉じただけでは終わりません。</p>
+
+<h2 id="trouble">6. 困ったとき</h2>
+<table>
+  <tr><th scope="row">ブラウザの画面が開かない</th><td>ブラウザで <code>http://localhost:8501</code> を開いてください。karuta-edit を2つ以上開いているときは、<code>8502</code>、<code>8503</code> と番号が増えます。</td></tr>
+  <tr><th scope="row">黒い画面がすぐ消える</th><td>「_internal」フォルダが karuta-edit.exe と同じ場所にあるか確かめてください。zip を展開せずに開いたときもこうなります。</td></tr>
+  <tr><th scope="row">ウイルス対策ソフトに消された</th><td>署名のないアプリは、ウイルス対策ソフトに誤って疑われることがあります。消されたり隔離されたりしたときは、配布した人に知らせてください。</td></tr>
+  <tr><th scope="row">歌の聞き分けができなかったと出る</th><td>インターネットにつながっているか確かめてください。つながらないときは、「詳細設定」で「読まれた歌を特定する」をオフにして進められます。</td></tr>
+  <tr><th scope="row">保存した短縮版が見つからない</th><td>ブラウザのダウンロードの一覧を開いてください。「保存する」は何度でも押せます。</td></tr>
+</table>
+
+<h2 id="remove">7. 削除するとき</h2>
+<p>展開したフォルダごと削除します。音声認識のデータ（約630 MB）も消すときは、エクスプローラーのアドレス欄に <code>%LOCALAPPDATA%</code> と入れて開き、中の「karuta-edit」フォルダを削除します。</p>
+
+<h2 id="licenses">8. 同梱しているソフトウェア</h2>
+<p>このアプリには、次のソフトウェアが入っています。ライセンスの全文は、同じフォルダの「licenses」にあります。</p>
+<table>
+  <tr><th scope="col">ソフトウェア</th><th scope="col">ライセンス</th><th scope="col">入手元</th></tr>
+  <tr><td>FFmpeg（動画の読み書き）</td><td>GNU GPL v3</td><td><a href="https://ffmpeg.org/">ffmpeg.org</a>（Windows 用のビルドは <a href="https://www.gyan.dev/ffmpeg/builds/">gyan.dev</a> の essentials 版）</td></tr>
+  <tr><td>Yuji Syuku（札の筆文字。ひらがなだけを切り出して使用）</td><td>SIL Open Font License 1.1</td><td><a href="https://github.com/Kinutafontfactory/Yuji">Kinuta Font Factory</a></td></tr>
+  <tr><td>Streamlit、NumPy、pandas、sherpa-onnx、pykakasi などの Python ライブラリ</td><td>それぞれのライセンス</td><td>PyPI</td></tr>
+</table>
+<p class="note">初回に取得する音声認識のデータは、<a href="https://github.com/k2-fsa/sherpa-onnx">sherpa-onnx</a> が配布しているものです（アプリには入っていません）。</p>
+
+<footer>
+  <p>新しい版と、これまでの版の一覧：<a href="https://github.com/{{REPOSITORY}}/releases">https://github.com/{{REPOSITORY}}/releases</a></p>
+</footer>
+</main>
+</body>
+</html>
