@@ -239,3 +239,91 @@ def test_summary_shows_how_many_candidates_were_reviewed(tmp_path):
 def test_auto_advance_is_off_by_default(tmp_path):
     at = _review_app(tmp_path, identified=False)
     assert at.checkbox(key="auto_advance").value is False
+
+
+# --- 書き出し (State 3) と完了 (State 4) ---
+
+def test_export_makes_the_video_and_shows_the_done_screen(tmp_path):
+    import numpy as np
+    video = _video(tmp_path, seconds=15)
+    scores = [(50, 5000), (110, 5000)]
+    at = AppTest.from_file("streamlit_app.py", default_timeout=120)
+    for key, value in {
+        "state": 3, "tmpdir": str(tmp_path), "input_video": str(video), "source_name": "match.mp4",
+        "source_duration": 15.0, "waveform": np.zeros(150), "sorted_scores": scores,
+        "segment_enabled": {idx: True for idx, _ in scores}, "preview_clips": {}, "readings": {},
+        "reviewed": set(), "clip_range": (1.5, 3.0),
+    }.items():
+        at.session_state[key] = value
+    at.run()
+    assert not at.exception
+    assert at.session_state.state == 4
+    result = at.session_state.result
+    assert result["scenes"] == 2
+    assert result["chapters"] == 2
+    assert result["first_chapter"].startswith("01 元動画 00:00:03.")
+    assert 8 < result["duration"] < 10  # 4.5秒 × 2場面
+    assert any("短縮版ができました" in m.value for m in at.markdown)
+
+
+def _done_app(tmp_path, saved=False):
+    at = AppTest.from_file("streamlit_app.py", default_timeout=30)
+    for key, value in {
+        "state": 4, "tmpdir": str(tmp_path), "source_name": "match.mp4", "source_duration": 3343.0,
+        "processed_video": b"0" * 1000, "saved": saved,
+        "result": {"duration": 446.4, "scenes": 100, "chapters": 87, "first_chapter": "01 元動画 00:01:39.600"},
+    }.items():
+        at.session_state[key] = value
+    at.run()
+    return at
+
+
+def test_done_screen_says_how_much_shorter_the_video_became(tmp_path):
+    at = _done_app(tmp_path)
+    assert any("55分43秒の試合が、7分26秒になりました" in m.value for m in at.markdown)
+    assert any("match_short.mp4" in m.value for m in at.markdown)
+    assert [m.value for m in at.metric if m.label == "チャプター"] == ["87"]
+
+
+def test_done_screen_warns_that_closing_before_saving_loses_the_video(tmp_path):
+    texts = [c.value for c in _done_app(tmp_path).caption]
+    assert any("保存するまで" in t for t in texts)
+
+
+def test_starting_over_before_saving_asks_first(tmp_path):
+    at = _done_app(tmp_path, saved=False)
+    _click(at, "別の動画を短縮する")
+    assert at.session_state.state == 4
+    assert any("まだ保存していません" in w.value for w in at.warning)
+    _click(at, "保存せずに最初に戻る")
+    assert at.session_state.state == 1
+
+
+def test_starting_over_before_saving_can_be_cancelled(tmp_path):
+    at = _done_app(tmp_path, saved=False)
+    _click(at, "別の動画を短縮する")
+    _click(at, "やめる")
+    assert at.session_state.state == 4
+    assert not at.warning
+
+
+def test_starting_over_after_saving_goes_straight_back_to_the_start(tmp_path):
+    at = _done_app(tmp_path, saved=True)
+    _click(at, "別の動画を短縮する")
+    assert at.session_state.state == 1
+
+
+def test_export_screen_can_cover_every_element_of_the_review_screen(tmp_path):
+    # 書き出しの間は実行が終わらないので、上書きされなかった確認画面の要素が薄く残ってしまう
+    # (2026-09-23 に Chrome で確認)。書き出し画面は LEFTOVER_SLOTS 個の空の要素で上書きする
+    from page_parts import LEFTOVER_SLOTS
+    for kwargs in (dict(unidentified=(2,)), dict(unidentified=()), dict(identified=False)):
+        assert len(_review_app(tmp_path, **kwargs).main.children) <= LEFTOVER_SLOTS
+
+
+def test_done_screen_explains_merged_chapters_only_when_scenes_were_merged(tmp_path):
+    assert any("1つのチャプターにまとめています" in c.value for c in _done_app(tmp_path).caption)
+    at = _done_app(tmp_path)
+    at.session_state["result"] = {**at.session_state["result"], "chapters": 100}
+    at.run()
+    assert not any("1つのチャプターにまとめています" in c.value for c in at.caption)

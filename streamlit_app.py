@@ -13,6 +13,9 @@ from page_parts import (
     FLOW_HTML,
     apply_page_style,
     auto_advance,
+    cover_leftovers,
+    duration_jp,
+    export_progress_text,
     leave_guard,
     needs_leave_guard,
     step_html,
@@ -29,6 +32,7 @@ from poem_id import (
 from reader_voice import compute_voiced_frames
 from utils import return_candidates
 from offline_app import (
+    get_chapter_titles,
     get_media_duration_sec,
     extract_audio,
     simplify_waveform,
@@ -608,70 +612,124 @@ if st.session_state.state == 2:
 # ---------------------------------------------------------------------------
 
 if st.session_state.state == 3:
+    ss = st.session_state
     st.html(stepper_html(4))
-    before, after = st.session_state.clip_range
-    waveform = st.session_state.waveform
-    sorted_scores = st.session_state.sorted_scores
+    before, after = ss.clip_range
+    enabled_set = {idx for idx, v in ss.segment_enabled.items() if v}
+    segments = compute_segments(ss.sorted_scores, enabled_set, before, after, len(ss.waveform))
+    output_video = os.path.join(ss.tmpdir, "processed.mp4")
 
-    enabled_set = {
-        idx for idx, v in st.session_state.segment_enabled.items() if v
-    }
-    segments = compute_segments(
-        sorted_scores, enabled_set, before, after, len(waveform)
-    )
-    est_sec = estimate_duration(segments)
-    est_min = int(est_sec) // 60
-    est_sec_remainder = est_sec - est_min * 60
-    output_video = os.path.join(st.session_state.tmpdir, "processed.mp4")
+    col_main, _ = st.columns([1.7, 1], gap="large")
+    with col_main:
+        st.markdown("## 短縮版を作っています")
+        st.caption(f"残す{len(enabled_set)}場面をつないで、約{duration_jp(estimate_duration(segments))}の動画にします。")
+        progress = st.progress(0.0, text=export_progress_text(0.0, 0.0))
+        with st.container(border=True):
+            st.markdown(f"**{shortened_file_name(ss.source_name)}**")
+            st.caption("保存するときの名前です。場面ごとにチャプターを付け、チャプターの名前を元動画の時刻にします。")
+        st.caption("終わるまで、この画面を閉じたり再読み込みしたりしないでください。確認の結果が消え、解析からやり直しになります。")
+    cover_leftovers()
 
-    # State 2 と同数の要素を描画してから処理開始することで、
-    # ブロッキング中に旧 State 2 の UI が残るのを防ぐ
-    st.info('動画を編集中...しばらくお待ちください。')
-    col_m1, col_m2 = st.columns([1, 1])
-    with col_m1:
-        st.metric("対象区間", f"{len(segments)}")
-    with col_m2:
-        st.metric("推定出力", f"{est_min}分{est_sec_remainder:.0f}秒")
-    progress = st.progress(0)
-
+    started = time.monotonic()
     cut_and_concat_mp4(
-        input_video=st.session_state.input_video,
+        input_video=ss.input_video,
         segments=segments,
         output_video=output_video,
-        source_name=st.session_state.source_name,
-        progress_callback=lambda p: progress.progress(p),
+        source_name=ss.source_name,
+        progress_callback=lambda p: progress.progress(p, text=export_progress_text(p, time.monotonic() - started)),
     )
 
     with open(output_video, "rb") as f:
-        st.session_state.processed_video = f.read()
-
-    st.session_state.state = 4
+        ss.processed_video = f.read()
+    chapters = get_chapter_titles(output_video)
+    ss.result = {
+        "duration": get_media_duration_sec(output_video),
+        "scenes": len(enabled_set),
+        "chapters": len(chapters),
+        "first_chapter": chapters[0] if chapters else "",
+    }
+    ss.state = 4
     st.rerun()
 
 
 # ---------------------------------------------------------------------------
-# State 4: ダウンロード
+# State 4: 完了 (保存)
 # ---------------------------------------------------------------------------
 
 def _mark_saved() -> None:
+    # 押した時点で保存済みとみなす。ブラウザの保存が終わったか・取り消されたかは、
+    # Streamlit からは分からない
     st.session_state.saved = True
+    st.session_state.confirm_start_over = False
+
+
+def _ask_start_over() -> None:
+    if st.session_state.get("saved"):
+        st.session_state.clear()
+    else:
+        st.session_state.confirm_start_over = True
+
+
+def _cancel_start_over() -> None:
+    st.session_state.confirm_start_over = False
 
 
 def _start_over() -> None:
     st.session_state.clear()
 
 
-if st.session_state.state == 4:
-    st.html(stepper_html(5))
-    st.success('動画の編集が完了しました')
-    # 保存しても画面は消さない。以前は押した時点でセッションを消していたので、
-    # 保存に失敗したり保存先を間違えたりすると、作り直すしかなかった。
-    st.download_button(
-        "保存する",
-        data=st.session_state.processed_video,
-        file_name=shortened_file_name(st.session_state.source_name),
-        mime="video/mp4",
-        type="primary",
-        on_click=_mark_saved,
+def _chapter_note_html(example: str) -> str:
+    sample = (f'<div style="margin:10px 0 0;padding:8px 12px;border-radius:6px;background:#E4E6DC;'
+              f'font-variant-numeric:tabular-nums;">{example}</div>') if example else ""
+    return (
+        '<div style="font-size:15px;font-weight:700;color:#3E443B;margin:8px 0 10px;">チャプターについて</div>'
+        '<div style="font-size:14px;line-height:1.8;color:#3E443B;">'
+        '場面ごとにチャプターがあり、名前はその場面の元動画の時刻です。'
+        'チャプターに対応した再生ソフトでは、一覧から場面へ移れます。'
+        f'{sample}</div>'
     )
-    st.button("別の動画を短縮する", on_click=_start_over)
+
+
+if st.session_state.state == 4:
+    ss = st.session_state
+    result = ss.result
+    st.html(stepper_html(5))
+    col_main, col_side = st.columns([1.7, 1], gap="large")
+    with col_main:
+        st.markdown("## 短縮版ができました")
+        source = ss.get("source_duration")
+        if source:
+            st.markdown(f"{duration_jp(source)}の試合が、{duration_jp(result['duration'])}になりました。")
+        else:
+            st.markdown(f"{duration_jp(result['duration'])}の短縮版になりました。")
+        with st.container(border=True):
+            st.markdown(f"**{shortened_file_name(ss.source_name)}**")
+            with st.container(horizontal=True):
+                st.metric("残した場面", result["scenes"])
+                st.metric("チャプター", result["chapters"])
+                st.metric("大きさ", _size_text(len(ss.processed_video)))
+            # 保存しても画面は消さない。以前は押した時点でセッションを消していたので、
+            # 保存に失敗したり保存先を間違えたりすると、作り直すしかなかった。
+            st.download_button(
+                "保存する",
+                data=ss.processed_video,
+                file_name=shortened_file_name(ss.source_name),
+                mime="video/mp4",
+                type="primary",
+                on_click=_mark_saved,
+            )
+            if ss.get("saved"):
+                st.caption("保存を始めました。ブラウザのダウンロードで確かめてください。何度でも保存し直せます。")
+            else:
+                st.caption("保存するまで、この画面を閉じたり再読み込みしたりしないでください。短縮版が消えます。")
+        if ss.get("confirm_start_over"):
+            st.warning("まだ保存していません。最初に戻ると、この短縮版は消えます。")
+            with st.container(horizontal=True):
+                st.button("保存せずに最初に戻る", on_click=_start_over)
+                st.button("やめる", on_click=_cancel_start_over)
+        else:
+            st.button("別の動画を短縮する", on_click=_ask_start_over)
+    with col_side:
+        st.html(_chapter_note_html(result.get("first_chapter", "")))
+        if result["chapters"] < result["scenes"]:
+            st.caption("間が短い場面どうしは、1つのチャプターにまとめています。")

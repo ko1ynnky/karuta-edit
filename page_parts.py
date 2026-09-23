@@ -1,4 +1,6 @@
 """画面の共通部品: 手順の表示、ページ離脱の確認、再生が終わったら次の候補へ進む仕組み。"""
+import math
+
 import streamlit as st
 
 STEPS = ["動画を選ぶ", "解析", "確認", "書き出し"]
@@ -64,6 +66,46 @@ def needs_leave_guard(state: int, saved: bool, analyzing: bool = False) -> bool:
     完了 (4) は、保存するまで短縮版が消える。
     """
     return analyzing or state in (2, 3) or (state == 4 and not saved)
+
+
+# 書き出しのように描き終える前に長く止まる画面では、前の画面の要素が薄く残る
+# (Streamlit は、実行が終わるまで前の実行の要素を消さない)。確認画面の一番上の階層の
+# 要素 (2026-09-23 時点で7個) より多い空の要素で上書きして消す。空の要素は場所を取らない
+LEFTOVER_SLOTS = 12
+
+
+def cover_leftovers() -> None:
+    for _ in range(LEFTOVER_SLOTS):
+        st.empty()
+
+
+def duration_jp(sec: float) -> str:
+    """動画の長さを「55分43秒」の形にする。"""
+    sec = int(round(sec))
+    h, rest = divmod(sec, 3600)
+    m, s = divmod(rest, 60)
+    if h:
+        return f"{h}時間{m}分{s}秒"
+    return f"{m}分{s}秒" if m else f"{s}秒"
+
+
+# cut_and_concat_mp4 は、場面の切り出しが終わるまでを 0〜0.97 で知らせる
+_CUT_DONE = 0.97
+
+
+def export_progress_text(fraction: float, elapsed: float) -> str:
+    """書き出しの進み具合と、これまでの速さから見積もった残り時間。"""
+    if fraction <= 0:
+        return "準備しています"
+    pct = int(fraction * 100)
+    if fraction >= _CUT_DONE:
+        return f"{pct}%　仕上げています"
+    if fraction < 0.05:
+        return f"{pct}%　残り時間を見積もっています"
+    remaining = elapsed / fraction * (1 - fraction)
+    if remaining >= 60:
+        return f"{pct}%　残り約{math.ceil(remaining / 60)}分"
+    return f"{pct}%　残り約{math.ceil(remaining)}秒"
 
 
 def step_html(status: str, title: str, detail: str = "") -> str:
