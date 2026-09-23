@@ -139,15 +139,74 @@ def _build_decode_input_options(
     return {"hwaccel": "videotoolbox"}
 
 
+def _probe_frame_times(media: str) -> np.ndarray:
+    """映像の各フレームの表示時刻 (秒) を昇順で返す。
+
+    ffmpeg は入力のタイムスタンプからファイルの start_time を引いて扱うので、
+    trim に渡す時刻と同じ基準になるよう start_time を引いておく。
+    """
+    start_time = float(ffmpeg.probe(media)["format"].get("start_time") or 0.0)
+    out = subprocess.run(
+        [
+            "ffprobe", "-v", "error", "-select_streams", "v:0",
+            "-show_entries", "packet=pts_time", "-of", "csv=p=0", media,
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    values = (line.split(",")[0] for line in out.split())
+    times = [float(v) for v in values if v not in ("", "N/A")]
+    return np.sort(np.array(times)) - start_time
+
+
+def _frame_ranges_in_segments(
+    segments: list[tuple[float, float]],
+    frame_times: np.ndarray,
+) -> list[tuple[int, int]]:
+    """各区間を、表示時刻が区間内にあるフレームの番号範囲 [first, stop) に置き換える。"""
+    ranges = []
+    for start, end in segments:
+        first = int(np.searchsorted(frame_times, start, side="left"))
+        stop = int(np.searchsorted(frame_times, end, side="left"))
+        if stop > first:
+            ranges.append((first, stop))
+    return ranges
+
+
+def _trim_window(
+    frame_times: np.ndarray,
+    first: int,
+    stop: int,
+) -> tuple[float, float]:
+    """trim がちょうど first..stop-1 のフレームを選ぶ時刻範囲。
+
+    境界をフレームの表示時刻ちょうどに置くと、シーク後の時刻の丸めで
+    前後のフレームが入ったり抜けたりするので、隣のフレームとの中間に置く。
+    """
+    if first > 0:
+        start = (frame_times[first - 1] + frame_times[first]) / 2
+    else:
+        start = max(0.0, frame_times[0] - 0.001)
+    if stop < len(frame_times):
+        end = (frame_times[stop - 1] + frame_times[stop]) / 2
+    else:
+        end = frame_times[-1] + 1.0
+    return float(start), float(end)
+
+
 def _encode_single_segment(
     input_video: str,
     segment: tuple[float, float],
     output_video: str,
-    encode_options: dict[str, object],
+    video_options: dict[str, object],
     decode_input_options: dict[str, object],
     seek_preroll_sec: float,
     progress_callback=None,
 ):
+    # 音声はここでは扱わない。区間ごとに AAC にすると先頭のプライミングと末尾の埋め草が
+    # つなぎ目ごとに残り、音声をデコード順に鳴らすプレーヤーで音が遅れていくため
+    # (_write_audio_following_video で一括して作る)。
     start, end = segment
     seek_preroll_sec = max(0.0, float(seek_preroll_sec))
     seek_start = max(0.0, start - seek_preroll_sec)
@@ -164,16 +223,10 @@ def _encode_single_segment(
         .filter("trim", start=local_start, end=local_end)
         .filter("setpts", "PTS-STARTPTS")
     )
-    audio_output = (
-        input_stream.audio
-        .filter("atrim", start=local_start, end=local_end)
-        .filter("asetpts", "PTS-STARTPTS")
-    )
     output_stream = ffmpeg.output(
         video_output,
-        audio_output,
         output_video,
-        **encode_options,
+        **video_options,
     )
     total_duration_sec = max(0.001, end - start)
     _run_output_stream(
@@ -201,17 +254,94 @@ def _concat_batch_outputs_copy(
         (
             ffmpeg
             .input(concat_file.name, format="concat", safe=0)
-            .output(
-                output_video,
-                c="copy",
-                movflags="+faststart",
-            )
+            .output(output_video, c="copy")
             .overwrite_output()
             .run(quiet=True)
         )
     finally:
         if os.path.exists(concat_file.name):
             os.remove(concat_file.name)
+
+
+def _extract_audio_pcm(input_video: str, output_wav: str) -> float:
+    """音声をチャンネル数・サンプルレートはそのままに WAV へ書き出す。
+
+    戻り値は WAV の先頭サンプルの時刻 (_probe_frame_times と同じ基準)。
+    """
+    probe = ffmpeg.probe(input_video)
+    audio_stream = next(s for s in probe["streams"] if s["codec_type"] == "audio")
+    format_start = float(probe["format"].get("start_time") or 0.0)
+    audio_start = float(audio_stream.get("start_time") or format_start)
+    (
+        ffmpeg
+        .input(input_video)
+        .audio
+        .output(output_wav, acodec="pcm_s16le")
+        .overwrite_output()
+        .run(quiet=True)
+    )
+    return audio_start - format_start
+
+
+def _read_zero_padded(src: sf.SoundFile, first: int, count: int) -> np.ndarray:
+    block = np.zeros((count, src.channels), dtype=np.int16)
+    lo = max(first, 0)
+    hi = min(first + count, src.frames)
+    if hi > lo:
+        src.seek(lo)
+        block[lo - first:hi - first] = src.read(hi - lo, dtype="int16", always_2d=True)
+    return block
+
+
+def _write_audio_following_video(
+    source_wav: str,
+    source_start_sec: float,
+    placements: list[tuple[float, float]],
+    total_duration_sec: float,
+    output_wav: str,
+):
+    """映像の各区間の配置どおりに元の音声を切り貼りした WAV を作る。
+
+    placements は区間ごとの (出力での開始時刻, 元動画での開始時刻)。各区間の音声は
+    次の区間の開始 (最後の区間は total_duration_sec) まで続く。区間の長さを
+    出力上の境界の差から決めるので、サンプル単位の丸めが区間を重ねても積み上がらない。
+    """
+    with sf.SoundFile(source_wav) as src:
+        sr = src.samplerate
+        with sf.SoundFile(
+            output_wav, "w", samplerate=sr, channels=src.channels, subtype="PCM_16"
+        ) as dst:
+            bounds = [round(out_sec * sr) for out_sec, _ in placements]
+            bounds.append(round(total_duration_sec * sr))
+            firsts = [round((src_sec - source_start_sec) * sr) for _, src_sec in placements]
+            # 映像の先頭フレームより前の分も元の音声で埋め、音声の先頭を映像の先頭にそろえる
+            firsts[0] -= bounds[0]
+            bounds[0] = 0
+            for k, first in enumerate(firsts):
+                dst.write(_read_zero_padded(src, first, bounds[k + 1] - bounds[k]))
+
+
+def _mux_video_and_audio(
+    video_path: str,
+    audio_path: str,
+    output_video: str,
+    audio_options: dict[str, object],
+):
+    video = ffmpeg.input(video_path).video
+    audio = ffmpeg.input(audio_path).audio
+    (
+        ffmpeg
+        .output(
+            video,
+            audio,
+            output_video,
+            vcodec="copy",
+            movflags="+faststart",
+            **audio_options,
+        )
+        .overwrite_output()
+        .run(quiet=True)
+    )
 
 
 def _first_positive_int(values: list[object]) -> int | None:
@@ -259,17 +389,18 @@ def _build_encode_options(
     crf: int,
     preset: str,
     video_bitrate_scale: float,
-) -> dict[str, object]:
+) -> tuple[dict[str, object], dict[str, object]]:
+    """(区間の映像エンコード用, 最後に一括で行う音声エンコード用) のオプションを返す。"""
     if encoder_mode == "libx264":
-        return {
-            "vcodec": "libx264",
-            "preset": preset,
-            "crf": crf,
-            "acodec": "aac",
-            "fps_mode": "vfr",
-            "movflags": "+faststart",
-            "b:a": "192k",
-        }
+        return (
+            {
+                "vcodec": "libx264",
+                "preset": preset,
+                "crf": crf,
+                "fps_mode": "vfr",
+            },
+            {"acodec": "aac", "b:a": "192k"},
+        )
 
     if encoder_mode == "videotoolbox_h264":
         source_bitrate_bps = get_video_bitrate_bps(input_video)
@@ -282,20 +413,20 @@ def _build_encode_options(
         maxrate_bps = int(target_bitrate_bps * 1.3)
         bufsize_bps = int(target_bitrate_bps * 2.0)
 
-        return {
-            "vcodec": "h264_videotoolbox",
-            "profile:v": "high",
-            "acodec": "aac_at",
-            "fps_mode": "vfr",
-            "movflags": "+faststart",
-            "b:v": str(target_bitrate_bps),
-            "maxrate:v": str(maxrate_bps),
-            "bufsize:v": str(bufsize_bps),
-            "b:a": "256k",
-            "allow_sw": "0",
-            "prio_speed": "1",
-            "spatial_aq": "1",
-        }
+        return (
+            {
+                "vcodec": "h264_videotoolbox",
+                "profile:v": "high",
+                "fps_mode": "vfr",
+                "b:v": str(target_bitrate_bps),
+                "maxrate:v": str(maxrate_bps),
+                "bufsize:v": str(bufsize_bps),
+                "allow_sw": "0",
+                "prio_speed": "1",
+                "spatial_aq": "1",
+            },
+            {"acodec": "aac_at", "b:a": "256k"},
+        )
 
     raise ValueError(f"Unsupported encoder_mode: {encoder_mode}")
 
@@ -413,27 +544,48 @@ def cut_and_concat_mp4(
         merge_gap_sec=float(merge_gap_sec),
         merged_count=len(merged_segments),
     )
+    probe_started_at = time.perf_counter()
+    frame_times = _probe_frame_times(input_video)
+    frame_ranges = _frame_ranges_in_segments(merged_segments, frame_times)
+    if not frame_ranges:
+        raise ValueError("No valid segments to process.")
+    windows = [_trim_window(frame_times, first, stop) for first, stop in frame_ranges]
+    last_stop = frame_ranges[-1][1]
+    if last_stop < len(frame_times):
+        last_frame_duration = frame_times[last_stop] - frame_times[last_stop - 1]
+    elif len(frame_times) >= 2:
+        last_frame_duration = frame_times[-1] - frame_times[-2]
+    else:
+        last_frame_duration = 1 / 30
+    emit_timing(
+        "probe_frame_times",
+        time.perf_counter() - probe_started_at,
+        frame_count=len(frame_times),
+        segment_count=len(frame_ranges),
+    )
     batch_size = max(1, int(batch_size))
     parallel_workers = max(1, int(parallel_workers))
     if encoder_mode != "videotoolbox_h264":
         parallel_workers = min(parallel_workers, 2)
 
     def run_with_options(
-        encode_options: dict[str, object],
+        encode_options: tuple[dict[str, object], dict[str, object]],
         decode_input_options: dict[str, object],
         selected_encoder_mode: str,
     ):
+        video_options, audio_options = encode_options
         tmp_dir = tempfile.mkdtemp(prefix="cut_segments_")
         try:
             segment_paths = [
                 os.path.join(tmp_dir, f"segment_{idx:04d}.mp4")
-                for idx in range(len(merged_segments))
+                for idx in range(len(windows))
             ]
+            segment_frame_counts = [0] * len(windows)
             segment_durations = [
-                max(0.001, end - start) for start, end in merged_segments
+                max(0.001, end - start) for start, end in windows
             ]
             total_duration = max(0.001, sum(segment_durations))
-            progress_by_segment = [0.0] * len(merged_segments)
+            progress_by_segment = [0.0] * len(windows)
             progress_done_duration = 0.0
             progress_target = 0.0
             progress_last_emitted = -1.0
@@ -442,7 +594,7 @@ def cut_and_concat_mp4(
             emit_timing(
                 "prepare_segments",
                 0.0,
-                segment_count=len(merged_segments),
+                segment_count=len(windows),
                 batch_size=batch_size,
                 parallel_workers=parallel_workers,
                 seek_preroll_sec=seek_preroll_sec,
@@ -484,7 +636,7 @@ def cut_and_concat_mp4(
                 progress_callback(target)
 
             def encode_segment(index: int):
-                segment = merged_segments[index]
+                segment = windows[index]
                 started_at = time.perf_counter()
 
                 def local_progress_cb(progress: float, idx=index):
@@ -494,31 +646,33 @@ def cut_and_concat_mp4(
                     input_video=input_video,
                     segment=segment,
                     output_video=segment_paths[index],
-                    encode_options=encode_options,
+                    video_options=video_options,
                     decode_input_options=decode_input_options,
                     seek_preroll_sec=seek_preroll_sec,
                     progress_callback=local_progress_cb,
                 )
+                # 結合後のどのフレームがどの区間かを知るため、実際に書き出されたフレーム数を数える
+                segment_frame_counts[index] = len(_probe_frame_times(segment_paths[index]))
                 elapsed = time.perf_counter() - started_at
                 return index, elapsed, max(0.001, segment[1] - segment[0])
 
             encode_started_at = time.perf_counter()
-            if parallel_workers == 1 or len(merged_segments) == 1:
-                for idx in range(len(merged_segments)):
+            if parallel_workers == 1 or len(windows) == 1:
+                for idx in range(len(windows)):
                     seg_idx, elapsed, duration = encode_segment(idx)
                     emit_progress(force=True)
                     emit_timing(
                         "encode_segment",
                         elapsed,
                         segment_index=seg_idx + 1,
-                        total_segments=len(merged_segments),
+                        total_segments=len(windows),
                         segment_duration_sec=duration,
                     )
             else:
                 with ThreadPoolExecutor(max_workers=parallel_workers) as executor:
                     pending = {
                         executor.submit(encode_segment, idx)
-                        for idx in range(len(merged_segments))
+                        for idx in range(len(windows))
                     }
                     while pending:
                         done, pending = wait(
@@ -533,23 +687,22 @@ def cut_and_concat_mp4(
                                 "encode_segment",
                                 elapsed,
                                 segment_index=seg_idx + 1,
-                                total_segments=len(merged_segments),
+                                total_segments=len(windows),
                                 segment_duration_sec=duration,
                             )
                     emit_progress(force=True)
             emit_timing(
                 "encode_segments_total",
                 time.perf_counter() - encode_started_at,
-                segment_count=len(merged_segments),
+                segment_count=len(windows),
                 parallel_workers=parallel_workers,
             )
 
-            if progress_callback is not None:
-                progress_callback(0.98)
             concat_started_at = time.perf_counter()
+            video_only_path = os.path.join(tmp_dir, "video_only.mp4")
             _concat_batch_outputs_copy(
                 batch_paths=segment_paths,
-                output_video=output_video,
+                output_video=video_only_path,
             )
             emit_timing(
                 "concat_segments_copy",
@@ -557,11 +710,50 @@ def cut_and_concat_mp4(
                 segment_count=len(segment_paths),
             )
             if progress_callback is not None:
+                progress_callback(0.98)
+
+            audio_started_at = time.perf_counter()
+            output_frame_times = _probe_frame_times(video_only_path)
+            if len(output_frame_times) != sum(segment_frame_counts):
+                raise RuntimeError(
+                    "Concatenated frame count does not match the segments: "
+                    f"{len(output_frame_times)} != {sum(segment_frame_counts)}"
+                )
+            segment_first_frames = np.cumsum([0] + segment_frame_counts[:-1])
+            placements = [
+                (float(output_frame_times[out_idx]), float(frame_times[first]))
+                for out_idx, (first, _) in zip(segment_first_frames, frame_ranges)
+            ]
+            source_wav = os.path.join(tmp_dir, "source_audio.wav")
+            aligned_wav = os.path.join(tmp_dir, "aligned_audio.wav")
+            source_start_sec = _extract_audio_pcm(input_video, source_wav)
+            _write_audio_following_video(
+                source_wav=source_wav,
+                source_start_sec=source_start_sec,
+                placements=placements,
+                total_duration_sec=float(output_frame_times[-1] + last_frame_duration),
+                output_wav=aligned_wav,
+            )
+            emit_timing("build_audio", time.perf_counter() - audio_started_at)
+            if progress_callback is not None:
+                progress_callback(0.99)
+
+            mux_started_at = time.perf_counter()
+            _mux_video_and_audio(
+                video_path=video_only_path,
+                audio_path=aligned_wav,
+                output_video=output_video,
+                audio_options=audio_options,
+            )
+            emit_timing("mux_audio", time.perf_counter() - mux_started_at)
+            if progress_callback is not None:
                 progress_callback(1.0)
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
-    def build_encode_options(selected_encoder_mode: str) -> dict[str, object]:
+    def build_encode_options(
+        selected_encoder_mode: str,
+    ) -> tuple[dict[str, object], dict[str, object]]:
         return _build_encode_options(
             input_video=input_video,
             encoder_mode=selected_encoder_mode,
