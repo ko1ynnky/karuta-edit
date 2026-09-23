@@ -267,9 +267,10 @@ use_reader_voice = st.checkbox(
     ),
 )
 
+# 既定オン: 歌が分かれば、特定できなかった候補だけを確かめれば済む (レビューの手間が大きく減る)
 identify_poems = st.checkbox(
     "読まれた歌を特定する",
-    value=False,
+    value=True,
     key="identify_poems",
     disabled=st.session_state.state != 1,
     help=(
@@ -392,6 +393,7 @@ if st.session_state.state == 2:
     waveform = st.session_state.waveform
     total_count = len(sorted_scores)
     review_idx = st.session_state.review_idx
+    readings = st.session_state.readings
 
     # ボタン起因の変更をチェックボックスwidget keyに事前反映
     # (widget描画前でないとsession_stateへの書き込みがエラーになるため)
@@ -432,30 +434,58 @@ if st.session_state.state == 2:
                 st.session_state._sync_checkboxes = True
                 st.rerun()
 
+        # 歌を特定できた候補は取りの場面とみてよいことが多いので、既定で確かめる候補を絞る
+        unidentified = [
+            i for i, (s_idx, _) in enumerate(sorted_scores)
+            if s_idx in readings and readings[s_idx].poem is None
+        ]
+        only_unidentified = bool(readings) and st.checkbox(
+            f"歌を特定できなかった候補だけ表示（{len(unidentified)}件）",
+            value=True,
+            key="only_unidentified",
+            help="下の句の読み始めに付いた候補（取りの場面ではない可能性があるもの）も含みます。"
+                 "オンの間は「はい」「いいえ」「スキップ」「戻る」もこの候補の間で移動します。",
+        )
+        visible = unidentified if only_unidentified else list(range(total_count))
+        if review_idx < total_count and review_idx not in visible:
+            review_idx = next((i for i in visible if i > review_idx), total_count)
+            st.session_state.review_idx = review_idx
+
+        def scene_row(i: int) -> None:
+            s_idx, s_score = sorted_scores[i]
+            s_center = s_idx / 10.0
+            s_start = max(0.1, s_center - before)
+            col_cb, col_btn = st.columns([1, 4])
+            with col_cb:
+                new_val = st.checkbox(
+                    f"{i}",
+                    value=st.session_state.segment_enabled[s_idx],
+                    key=f"sb_cb_{s_idx}",
+                    label_visibility="collapsed",
+                )
+                if new_val != st.session_state.segment_enabled[s_idx]:
+                    st.session_state.segment_enabled[s_idx] = new_val
+                    st.rerun()
+            with col_btn:
+                prefix = ">> " if i == review_idx else ""
+                label = f"{prefix}#{i + 1} {format_time(s_start)} {s_score / 100:.2f}"
+                if s_idx in readings:
+                    label += f" {short_label(readings[s_idx])}"
+                if st.button(label, key=f"sb_jump_{s_idx}"):
+                    st.session_state.review_idx = i
+                    st.rerun()
+
         scene_container = st.container(height=600)
         with scene_container:
-            for i, (s_idx, s_score) in enumerate(sorted_scores):
-                s_center = s_idx / 10.0
-                s_start = max(0.1, s_center - before)
-                col_cb, col_btn = st.columns([1, 4])
-                with col_cb:
-                    new_val = st.checkbox(
-                        f"{i}",
-                        value=st.session_state.segment_enabled[s_idx],
-                        key=f"sb_cb_{s_idx}",
-                        label_visibility="collapsed",
-                    )
-                    if new_val != st.session_state.segment_enabled[s_idx]:
-                        st.session_state.segment_enabled[s_idx] = new_val
-                        st.rerun()
-                with col_btn:
-                    prefix = ">> " if i == review_idx else ""
-                    label = f"{prefix}#{i + 1} {format_time(s_start)} {s_score / 100:.2f}"
-                    if s_idx in st.session_state.readings:
-                        label += f" {short_label(st.session_state.readings[s_idx])}"
-                    if st.button(label, key=f"sb_jump_{s_idx}"):
-                        st.session_state.review_idx = i
-                        st.rerun()
+            for i in visible:
+                scene_row(i)
+            # 絞り込みで外した候補も、閉じた折りたたみの中で描画し続ける。描画しないと
+            # Streamlit がチェックボックスの状態を捨て、次に表示したとき古い値に戻ることがある。
+            hidden = [i for i in range(total_count) if i not in set(visible)]
+            if hidden:
+                with st.expander(f"歌を特定できた候補（{len(hidden)}件）"):
+                    for i in hidden:
+                        scene_row(i)
 
     # --- メインエリア ---
     if review_idx < total_count:
@@ -471,12 +501,13 @@ if st.session_state.state == 2:
             f"[{format_time(seg_start)} - {format_time(seg_end)}] &nbsp; "
             f"Score: {score / 100}"
         )
-        if idx in st.session_state.readings:
-            st.markdown(f"歌: {describe_reading(st.session_state.readings[idx])}")
+        if idx in readings:
+            st.markdown(f"歌: {describe_reading(readings[idx])}")
 
+        # 既定オフ: 歌の特定を使えば全候補を流して聞く必要は減り、確かめたい候補だけ再生すればよい
         auto_advance = st.checkbox(
             "自動で次の候補を再生する",
-            value=True,
+            value=False,
             key="auto_advance",
         )
 
@@ -519,28 +550,34 @@ if st.session_state.state == 2:
 
         render_auto_advance(auto_advance, f"{review_idx}")
 
-        # 操作ボタン
+        # 操作ボタン (絞り込み中は、表示している候補の間で移動する)
+        earlier = [i for i in visible if i < review_idx]
+        next_idx = next((i for i in visible if i > review_idx), total_count)
         col_back, col_yes, col_no, col_skip = st.columns(4)
         with col_back:
-            if st.button("← 戻る", disabled=(review_idx == 0)):
-                st.session_state.review_idx -= 1
+            if st.button("← 戻る", disabled=not earlier):
+                st.session_state.review_idx = earlier[-1]
                 st.rerun()
         with col_yes:
             if st.button("はい"):
                 st.session_state.segment_enabled[idx] = True
                 st.session_state._sync_checkboxes = True
-                st.session_state.review_idx += 1
+                st.session_state.review_idx = next_idx
                 st.rerun()
         with col_no:
             if st.button("いいえ"):
                 st.session_state.segment_enabled[idx] = False
                 st.session_state._sync_checkboxes = True
-                st.session_state.review_idx += 1
+                st.session_state.review_idx = next_idx
                 st.rerun()
         with col_skip:
             if st.button(NEXT_BUTTON_LABEL):
-                st.session_state.review_idx += 1
+                st.session_state.review_idx = next_idx
                 st.rerun()
+    elif only_unidentified and not unidentified:
+        st.info("歌を特定できなかった候補はありません。このまま編集へ進めます。")
+    elif only_unidentified:
+        st.info("歌を特定できなかった候補の確認が完了しました。")
     else:
         st.info("全区間の確認が完了しました。")
 
