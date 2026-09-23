@@ -126,7 +126,6 @@ export default function (component) {
 }
 """
 
-_component = st.components.v2.component("karuta_card_strip", css=_CSS, js=_JS)
 
 
 def _mmss(sec: float) -> str:
@@ -169,4 +168,38 @@ def strip_items(sorted_scores, readings: dict, enabled: dict, reviewed: set) -> 
 
 def card_strip(items: list[dict], current: int, key: str, on_jump):
     """札の列を描く。札が押されると on_jump が呼ばれ、st.session_state[key] に位置が入る。"""
-    return _component(key=key, data={"items": items, "current": current}, on_jump_change=on_jump)
+    # 登録は描くたびに行う。モジュールの読み込み時に1回だけ登録すると、Streamlit の実行環境が
+    # 作り直されたとき (AppTest のテストごとなど) に登録が消え、"is not registered" で落ちる。
+    # 同じ定義での登録し直しは警告も出ない。
+    component = st.components.v2.component("karuta_card_strip", css=_CSS, js=_JS)
+    return component(key=key, data={"items": items, "current": current}, on_jump_change=on_jump)
+
+
+def review_queue(sorted_scores, readings: dict) -> list[int]:
+    """確かめる札の位置 (時刻順)。歌の特定を使ったときは歌が分からなかった候補、使わなければ全候補。"""
+    if not readings:
+        return list(range(len(sorted_scores)))
+    return [i for i, (idx, _) in enumerate(sorted_scores) if readings[idx].poem is None]
+
+
+def neighbor(queue: list[int], current: int, step: int) -> int | None:
+    """current から step の向き (+1: 次、-1: 前) にある、いちばん近い確かめる札。"""
+    ahead = [i for i in queue if (i - current) * step > 0]
+    if not ahead:
+        return None
+    return ahead[0] if step > 0 else ahead[-1]
+
+
+def queue_steps(queue: list[int], sorted_scores, enabled: dict, reviewed: set, current: int) -> list[dict]:
+    """「確かめる順番」の表示: 何番目か、候補番号、状態 (off: 外した / kept: 残した / now / todo)。"""
+    steps = []
+    for order, i in enumerate(queue, 1):
+        idx = sorted_scores[i][0]
+        if i == current:
+            state = "now"
+        elif idx in reviewed:
+            state = "kept" if enabled[idx] else "off"
+        else:
+            state = "todo"
+        steps.append({"order": order, "n": i + 1, "state": state})
+    return steps

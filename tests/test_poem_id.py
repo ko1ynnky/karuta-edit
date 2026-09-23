@@ -9,12 +9,11 @@ from hyakunin_isshu import POEMS
 from poem_id import (
     Match,
     Reading,
-    describe_reading,
     identify_readings,
     match_phrase,
     poem_label,
     resolve_readings,
-    short_label,
+    review_text,
     to_kana,
 )
 
@@ -190,65 +189,61 @@ def test_confirmation_is_unknown_when_next_reading_has_no_shimo_before_it():
     assert readings[1].confirmed is True
 
 
-def test_description_of_kami_confirmed_by_next_shimo():
+def test_review_text_of_kami_confirmed_by_next_shimo():
     [reading, _] = resolve_readings([_reading(100, kami=17), _reading(120, kami=3, shimo=17)])
-    assert describe_reading(reading) == "17 ちはやぶる（上の句、次の下の句でも一致）"
+    text = review_text(reading)
+    assert text["title"] == "17 ちはやぶる の上の句です"
+    assert "次の読みの前の下の句でも同じ歌" in text["detail"]
+    assert text["recommend"] == "keep"
 
 
-def test_description_of_kami_that_could_not_be_checked():
+def test_review_text_of_kami_that_could_not_be_checked():
     [reading] = resolve_readings([_reading(100, kami=17)])
-    assert describe_reading(reading) == "17 ちはやぶる（上の句）"
+    assert review_text(reading) == {"title": "17 ちはやぶる の上の句です", "detail": "", "recommend": "keep"}
 
 
-def test_description_suggests_missed_reading_when_next_shimo_differs():
+def test_review_text_suggests_missed_reading_when_next_shimo_differs():
     [reading, _] = resolve_readings([
         _reading(486, kami=33, kami_cost=0.176),
         _reading(558, kami=20, shimo=64, shimo_cost=0.214),
     ])
-    text = describe_reading(reading)
-    assert text.startswith("33 ひさかたの（上の句）")
-    assert "64 あさぼらけ" in text
-    assert "候補" in text
+    text = review_text(reading)
+    assert text["title"] == "33 ひさかたの の上の句です"
+    assert "64 あさぼらけ" in text["detail"]
+    assert "候補" in text["detail"]
 
 
-def test_description_of_poem_inferred_from_next_shimo():
+def test_review_text_of_poem_inferred_from_next_shimo():
     [reading, _] = resolve_readings([_reading(151, shimo=38), _reading(188, shimo=95)])
-    assert describe_reading(reading) == "95 おほけなく（次の読みの前の下の句から推定）"
+    text = review_text(reading)
+    assert text["title"] == "95 おほけなく の上の句と推定しました"
+    assert "下の句" in text["detail"]
+    assert text["recommend"] == "keep"
 
 
-def test_description_of_shimo_warns_it_may_not_be_a_take():
+def test_review_text_of_shimo_start_recommends_removing_it():
     [reading] = resolve_readings([_reading(574, after_shimo=20)])
-    text = describe_reading(reading)
-    assert "20 わびぬれば" in text
-    assert "下の句" in text
-    assert "取り" in text
+    text = review_text(reading)
+    assert text["title"] == "下の句の読み始めです"
+    assert "20 わびぬれば" in text["detail"]
+    assert "取りの場面ではない" in text["detail"]
+    assert text["recommend"] == "remove"
 
 
-def test_description_of_reading_whose_poem_is_unknown():
+def test_review_text_of_reading_whose_poem_is_unknown():
     # 直前に下の句があるので読みの場面だが、次の下の句もない (試合の最後など)
     [reading] = resolve_readings([_reading(4118, shimo=40)])
-    text = describe_reading(reading)
-    assert text.startswith("特定できませんでした")
-    assert "読み" in text
+    text = review_text(reading)
+    assert text["title"] == "読みの場面のようです"
+    assert text["recommend"] is None
 
 
-def test_description_when_nothing_is_identified():
+def test_review_text_when_nothing_is_identified():
     [reading] = resolve_readings([_reading(100)])
-    assert describe_reading(reading) == "特定できませんでした"
-
-
-def test_short_label_for_scene_list():
-    kami, shimo_start, inferred, _, nothing = resolve_readings([
-        _reading(100, kami=17),
-        _reading(110, after_shimo=17),
-        _reading(150, shimo=17),
-        _reading(170, shimo=95),
-        _reading(200),
-    ])
-    assert short_label(kami) == "ちはやぶる"
-    assert short_label(shimo_start) == "(下の句)"
-    assert short_label(inferred) == "おほけなく"
-    assert short_label(nothing) == ""
+    text = review_text(reading)
+    assert text["title"] == "歌を特定できませんでした"
+    assert "映像" in text["detail"]
+    assert text["recommend"] is None
 
 
 class _FakeRecognizer:

@@ -48,10 +48,10 @@ def test_poem_identification_toggle_can_be_turned_off_before_analysis():
     assert not at.exception
 
 
-# --- レビュー画面 (State 2) ---
+# --- 確認画面 (State 2) ---
 
 def _review_app(tmp_path, unidentified=(), identified=True):
-    """4候補のレビュー画面。unidentified に挙げた番号 (1始まり) だけ歌を特定できなかったとする。"""
+    """4候補の確認画面。unidentified に挙げた番号 (1始まり) だけ歌を特定できなかったとする。"""
     import numpy as np
     import soundfile as sf
     from poem_id import Reading
@@ -67,92 +67,83 @@ def _review_app(tmp_path, unidentified=(), identified=True):
     for key, value in {
         "state": 2, "tmpdir": str(tmp_path), "input_video": str(tmp_path / "v.mp4"), "source_name": "v.mp4",
         "audio_path": str(wav), "waveform": np.zeros(600), "sorted_scores": scores,
-        "segment_enabled": {idx: True for idx, _ in scores}, "preview_clips": {}, "review_idx": 0,
-        "readings": readings,
+        "segment_enabled": {idx: True for idx, _ in scores}, "preview_clips": {},
+        "readings": readings, "reviewed": set(), "clip_range": (1.5, 3.0),
     }.items():
         at.session_state[key] = value
     at.run()
     return at
 
 
-def _labels(buttons):
-    return [b.label.removeprefix(">> ").split()[0] for b in buttons if "#" in b.label]
-
-
-def _scene_labels(at):
-    """全シーン一覧の、折りたたみの外に並んだ候補。"""
-    folded = set(_folded_labels(at))
-    return [label for label in _labels(at.sidebar.button) if label not in folded]
-
-
-def _folded_labels(at):
-    return [label for e in at.sidebar.expander for label in _labels(e.button)]
-
-
 def _current(at):
-    return next(m.value.split("**")[1] for m in at.markdown if m.value.startswith("**#"))
+    """確認中の候補番号 (例: "#2")。"""
+    return next(m.value.split()[0].strip("*") for m in at.markdown if "元動画" in m.value)
 
 
 def _click(at, label):
     next(b for b in at.button if b.label == label).click().run()
 
 
-def test_auto_advance_is_off_by_default(tmp_path):
-    at = _review_app(tmp_path, identified=False)
-    assert at.checkbox(key="auto_advance").value is False
+def test_review_screen_does_not_show_video_selection_or_settings(tmp_path):
+    at = _review_app(tmp_path, unidentified=(2,))
+    assert len(at.get("file_uploader")) == 0
+    assert len(at.slider) == 0
+    assert "identify_poems" not in [c.key for c in at.checkbox]
 
 
-def test_unidentified_filter_is_on_by_default_and_narrows_scene_list(tmp_path):
-    at = _review_app(tmp_path, unidentified=(2, 4))
-    toggle = at.checkbox(key="only_unidentified")
-    assert toggle.value is True
-    assert "2件" in toggle.label
-    assert _scene_labels(at) == ["#2", "#4"]
-    assert _folded_labels(at) == ["#1", "#3"]  # 特定できた候補は折りたたみの中に残る
-
-
-def test_scene_list_shows_all_candidates_when_filter_is_off(tmp_path):
-    at = _review_app(tmp_path, unidentified=(2, 4))
-    at.checkbox(key="only_unidentified").uncheck().run()
-    assert _scene_labels(at) == ["#1", "#2", "#3", "#4"]
-    assert _folded_labels(at) == []
-
-
-def test_narrowed_review_moves_between_unidentified_candidates_only(tmp_path):
+def test_review_starts_at_the_first_card_to_check(tmp_path):
     at = _review_app(tmp_path, unidentified=(2, 4))
     assert _current(at) == "#2"
-    _click(at, "はい")
+    assert any("2件を確かめてください" in m.value for m in at.markdown)
+
+
+def test_removing_and_keeping_move_to_the_next_card_to_check(tmp_path):
+    at = _review_app(tmp_path, unidentified=(2, 4))
+    _click(at, "外す")
     assert _current(at) == "#4"
-    _click(at, "← 戻る")
-    assert _current(at) == "#2"
-    _click(at, "いいえ")
-    _click(at, "スキップ →")
-    assert not any(m.value.startswith("**#") for m in at.markdown)
-    assert any("確認が完了" in i.value for i in at.info)
     assert at.session_state.segment_enabled[200] is False
+    assert 200 in at.session_state.reviewed
+    _click(at, "残す")
+    assert at.session_state.segment_enabled[400] is True
+    assert any("確かめ終わりました" in i.value for i in at.info)
+
+
+def test_previous_and_next_move_among_cards_to_check(tmp_path):
+    at = _review_app(tmp_path, unidentified=(2, 4))
+    _click(at, "次の件")
+    assert _current(at) == "#4"
+    _click(at, "前の件")
+    assert _current(at) == "#2"
+
+
+def test_recommended_decision_is_the_primary_button(tmp_path):
+    import numpy as np  # noqa: F401
+    at = _review_app(tmp_path, unidentified=(2,))
+    keep = next(b for b in at.button if b.label == "残す")
+    remove = next(b for b in at.button if b.label == "外す")
+    # 歌が分からない候補には、おすすめを出さない
+    assert keep.proto.type == remove.proto.type == "secondary"
+
+
+def test_summary_shows_kept_scenes_and_the_create_button(tmp_path):
+    at = _review_app(tmp_path, unidentified=(2,))
+    _click(at, "外す")
+    assert [m.value for m in at.metric if m.label == "残す場面"] == ["3"]
+    assert any(b.label == "短縮版を作る" for b in at.button)
 
 
 def test_review_says_so_when_every_poem_is_identified(tmp_path):
     at = _review_app(tmp_path, unidentified=())
-    assert any("特定できなかった候補はありません" in i.value for i in at.info)
+    assert any("確かめる札はありません" in i.value for i in at.info)
 
 
-def test_unidentified_filter_is_hidden_without_poem_identification(tmp_path):
+def test_without_identification_every_candidate_is_reviewed_in_order(tmp_path):
     at = _review_app(tmp_path, identified=False)
-    assert "only_unidentified" not in [c.key for c in at.checkbox]
-    assert _scene_labels(at) == ["#1", "#2", "#3", "#4"]
     assert _current(at) == "#1"
+    _click(at, "次の件")
+    assert _current(at) == "#2"
 
 
-def test_choices_are_kept_while_the_filter_is_switched(tmp_path):
-    at = _review_app(tmp_path, unidentified=(2, 4))
-    _click(at, "いいえ")
-    at.checkbox(key="only_unidentified").uncheck().run()
-    assert at.session_state.segment_enabled == {100: True, 200: False, 300: True, 400: True}
-    _click(at, "全解除")
-    at.checkbox(key="only_unidentified").check().run()
-    at.checkbox(key="only_unidentified").uncheck().run()
-    assert at.session_state.segment_enabled == {100: False, 200: False, 300: False, 400: False}
-    assert {k: at.checkbox(key=f"sb_cb_{k}").value for k in (100, 200, 300, 400)} == {
-        100: False, 200: False, 300: False, 400: False,
-    }
+def test_auto_advance_is_off_by_default(tmp_path):
+    at = _review_app(tmp_path, identified=False)
+    assert at.checkbox(key="auto_advance").value is False

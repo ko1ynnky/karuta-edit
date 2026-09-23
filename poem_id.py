@@ -185,32 +185,42 @@ def resolve_readings(readings: list[Reading]) -> list[Reading]:
     return result
 
 
-def describe_reading(reading: Reading) -> str:
-    """レビュー画面に出す、候補で読まれた歌の説明。"""
-    if reading.source == "shimo":
-        return f"{poem_label(reading.poem)}（次の読みの前の下の句から推定）"
+def review_text(reading: Reading) -> dict:
+    """確認画面に出す、候補の見出し・説明と、おすすめの判断 ("keep" / "remove" / None)。"""
     if reading.source == "kami":
-        text = f"{poem_label(reading.poem)}（上の句"
+        title = f"{poem_label(reading.poem)} の上の句です"
         if reading.confirmed:
-            return text + "、次の下の句でも一致）"
-        if reading.confirmed is False:
-            return (text + f"）。次の読みの前の下の句は {poem_label(reading.next_shimo)} でした。"
-                    "間の読みが候補になっていないか、どちらかの特定の誤りです")
-        return text + "）"
+            detail = "次の読みの前の下の句でも同じ歌でした。"
+        elif reading.confirmed is False:
+            detail = (f"次の読みの前の下の句は {poem_label(reading.next_shimo)} でした。"
+                      "間の読みが候補になっていないか、どちらかの特定の誤りです。")
+        else:
+            detail = ""
+        return {"title": title, "detail": detail, "recommend": "keep"}
+    if reading.source == "shimo":
+        return {
+            "title": f"{poem_label(reading.poem)} の上の句と推定しました",
+            "detail": "上の句は聞き取れませんでしたが、次の読みの前にこの歌の下の句が読まれています。",
+            "recommend": "keep",
+        }
     if _starts_kami(reading):
-        return "特定できませんでした（直前に下の句が読まれているので、読みの場面と考えられます）"
+        return {
+            "title": "読みの場面のようです",
+            "detail": "直前に下の句が読まれていますが、歌は特定できませんでした。",
+            "recommend": None,
+        }
     if reading.after is not None and reading.after.part == "shimo":
-        return f"{poem_label(reading.after.poem)} の下の句の読み始めのようです（取りの場面ではない可能性があります）"
-    return "特定できませんでした"
-
-
-def short_label(reading: Reading) -> str:
-    """全シーン一覧に添える短い名前。"""
-    if reading.poem is not None:
-        return POEMS[reading.poem][1].split()[0]
-    if not _starts_kami(reading) and reading.after is not None and reading.after.part == "shimo":
-        return "(下の句)"
-    return ""
+        return {
+            "title": "下の句の読み始めです",
+            "detail": (f"{poem_label(reading.after.poem)} の下の句が読まれています。"
+                       "取りの場面ではないので、外すのがおすすめです。"),
+            "recommend": "remove",
+        }
+    return {
+        "title": "歌を特定できませんでした",
+        "detail": "読みの声が聞き取れませんでした。取りの場面かどうか、映像で確かめてください。",
+        "recommend": None,
+    }
 
 
 def identify_readings(wav_path: str, onsets_sec: list[float], recognizer, progress=None) -> list[Reading]:
