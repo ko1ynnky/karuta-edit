@@ -220,6 +220,22 @@ def test_without_identification_checking_every_candidate_is_not_demanded(tmp_pat
     assert not any("確かめてください" in t for t in texts)
 
 
+def test_current_card_says_whether_it_was_reviewed(tmp_path):
+    at = _review_app(tmp_path, identified=False)
+    assert any("未確認（このままなら残ります）" in c.value for c in at.caption)
+    _click(at, "外す")
+    _click(at, "前の件")
+    assert _current(at) == "#1"
+    assert any("確認済み：外す" in c.value for c in at.caption)
+
+
+def test_summary_shows_how_many_candidates_were_reviewed(tmp_path):
+    at = _review_app(tmp_path, identified=False)
+    _click(at, "残す")
+    _click(at, "外す")
+    assert [m.value for m in at.metric if m.label == "確認済み"] == ["2 / 4"]
+
+
 def test_auto_advance_is_off_by_default(tmp_path):
     at = _review_app(tmp_path, identified=False)
     assert at.checkbox(key="auto_advance").value is False

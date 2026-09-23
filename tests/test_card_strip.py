@@ -76,3 +76,15 @@ def test_queue_steps_show_what_was_decided_and_where_you_are():
     assert [(s["order"], s["n"], s["state"]) for s in steps] == [
         (1, 1, "off"), (2, 2, "kept"), (3, 3, "now"), (4, 4, "todo"),
     ]
+
+
+def test_every_card_tells_whether_it_was_reviewed():
+    # 途中まで確かめたとき「どこまで確かめたか」が分かるように、歌が分かった札でも持つ
+    readings = {1010: _reading(1010), 1230: _reading(1230, poem=17), 1530: _reading(1530), 4000: _reading(4000, poem=3)}
+    items = _items(readings, reviewed=(1230, 1530))
+    assert [it["reviewed"] for it in items] == [False, True, True, False]
+
+
+def test_reviewed_cards_without_identification_show_the_decision():
+    items = _items({}, enabled={1010: False, 1230: True, 1530: True, 4000: True}, reviewed=(1010, 1230))
+    assert [it["state"] for it in items] == ["off", "kept", "plain", "plain"]

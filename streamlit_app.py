@@ -557,6 +557,10 @@ if st.session_state.state == 2:
             elif review_idx in queue:
                 st.caption(f"{queue.index(review_idx) + 1} / {len(queue)} 件目")
             st.markdown(f"**#{review_idx + 1}**　元動画 {format_time(center)}")
+            if idx in ss.reviewed:
+                st.caption(f"確認済み：{'残す' if ss.segment_enabled[idx] else '外す'}")
+            else:
+                st.caption(f"未確認（このままなら{'残ります' if ss.segment_enabled[idx] else '外れます'}）")
             text = (
                 review_text(reading) if reading is not None
                 else {"title": "読みの候補です", "detail": "", "recommend": None}
@@ -589,6 +593,7 @@ if st.session_state.state == 2:
         st.info(f"まだ確かめていない札が{left}件あります。札を押すと、その候補に戻れます。")
 
     with st.container(border=True, horizontal=True, vertical_alignment="center"):
+        st.metric("確認済み", f"{len(ss.reviewed)} / {total_count}")
         st.metric("残す場面", enabled_count)
         st.metric("短縮版の長さ", f"約{est_min}分{est_sec_remainder:.0f}秒")
         if st.button("短縮版を作る", type="primary", disabled=enabled_count == 0):

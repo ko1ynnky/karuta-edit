@@ -44,6 +44,8 @@ _CSS = """
 .ks-note { font-size: 10px; font-weight: 400; }
 .ks-now { outline: 3px solid #1F231E; outline-offset: 3px; }
 .ks-time { font-size: 11px; color: #3F3D2E; font-variant-numeric: tabular-nums; }
+.ks-rev { color: #213A2F; font-weight: 700; }
+.ks-map-mark.rev { top: 8px; width: 3px; height: 4px; margin-left: -1.5px; background: #213A2F; }
 @media (prefers-reduced-motion: reduce) { .ks-strip, .ks-map-window { transition: none; } }
 """
 
@@ -53,21 +55,23 @@ const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&l
 function card(it, i, now) {
   const cur = now ? ' ks-now' : '';
   const attrs = `type="button" data-i="${i}"${now ? ' aria-current="true"' : ''}`;
+  const rev = it.reviewed ? ' 確認済み' : '';
   let face;
   if (it.state === 'known' || it.state === 'known_off') {
     const dim = it.state === 'known_off' ? ' ks-dim' : '';
     const kana = it.kana.map((k) => `<span>${esc(k)}</span>`).join('');
-    face = `<button ${attrs} class="ks-card ks-up${dim}${cur}" aria-label="#${it.n} ${it.time} ${esc(it.label)}"><span class="ks-kana">${kana}</span></button>`;
+    face = `<button ${attrs} class="ks-card ks-up${dim}${cur}" aria-label="#${it.n} ${it.time} ${esc(it.label)}${rev}"><span class="ks-kana">${kana}</span></button>`;
   } else if (it.state === 'off') {
-    face = `<button ${attrs} class="ks-card ks-off${cur}" aria-label="#${it.n} ${it.time} 外した">${it.n}<span class="ks-note">外した</span></button>`;
+    face = `<button ${attrs} class="ks-card ks-off${cur}" aria-label="#${it.n} ${it.time} 外した${rev}">${it.n}<span class="ks-note">外した</span></button>`;
   } else if (it.state === 'kept') {
-    face = `<button ${attrs} class="ks-card ks-down ks-kept${cur}" aria-label="#${it.n} ${it.time} 残した">${it.n}<span class="ks-note">残す</span></button>`;
+    face = `<button ${attrs} class="ks-card ks-down ks-kept${cur}" aria-label="#${it.n} ${it.time} 残した${rev}">${it.n}<span class="ks-note">残す</span></button>`;
   } else {
     const cls = it.state === 'check' ? 'ks-down' : 'ks-plain';
     const what = it.state === 'check' ? ' 確かめる' : '';
-    face = `<button ${attrs} class="ks-card ${cls}${cur}" aria-label="#${it.n} ${it.time}${what}">${it.n}</button>`;
+    face = `<button ${attrs} class="ks-card ${cls}${cur}" aria-label="#${it.n} ${it.time}${what}${rev}">${it.n}</button>`;
   }
-  return `<li class="ks-item">${face}<span class="ks-time">${it.time}</span></li>`;
+  const time = it.reviewed ? `<span class="ks-time ks-rev">✓${it.time}</span>` : `<span class="ks-time">${it.time}</span>`;
+  return `<li class="ks-item">${face}${time}</li>`;
 }
 
 export default function (component) {
@@ -96,9 +100,10 @@ export default function (component) {
   const lastIndex = Math.max(1, items.length - 1);
   items.forEach((it, i) => {
     const flagged = it.state === 'check' || it.state === 'kept' || it.state === 'off';
-    if (!flagged && i !== current) return;
+    if (!flagged && !it.reviewed && i !== current) return;
     const m = document.createElement('span');
-    m.className = 'ks-map-mark' + (i === current ? ' now' : it.state === 'check' ? '' : ' done');
+    const kind = i === current ? ' now' : it.state === 'check' ? '' : flagged ? ' done' : ' rev';
+    m.className = 'ks-map-mark' + kind;
     m.style.left = `${(i / lastIndex) * 100}%`;
     bar.appendChild(m);
   });
@@ -142,26 +147,27 @@ def strip_items(sorted_scores, readings: dict, enabled: dict, reviewed: set) -> 
     """候補を札の列の中身にする。
 
     state: known (歌が分かった) / known_off (歌は分かったが外した) / check (確かめる) /
-    kept・off (確かめて残した・外した) / plain (歌の特定を使わなかった)。
+    kept・off (確かめて残した・外した) / plain (歌の特定を使わず、まだ確かめていない)。
+    reviewed: 外す・残すを1回以上押したか。途中まで確かめたとき、どこまで見たかが分かるように
+    すべての札で持つ (ユーザーの要望)。
     """
     items = []
     for n, (idx, _) in enumerate(sorted_scores, 1):
         reading = readings.get(idx)
         poem = reading.poem if reading is not None else None
-        if not readings:
-            state = "plain"
-        elif poem is not None:
+        if poem is not None:
             state = "known" if enabled[idx] else "known_off"
         elif idx in reviewed:
             state = "kept" if enabled[idx] else "off"
         else:
-            state = "check"
+            state = "check" if readings else "plain"
         items.append({
             "n": n,
             "time": _mmss(idx / 10),
             "state": state,
             "kana": _torifuda_columns(poem) if poem is not None else [],
             "label": poem_label(poem) if poem is not None else "",
+            "reviewed": idx in reviewed,
         })
     return items
 
