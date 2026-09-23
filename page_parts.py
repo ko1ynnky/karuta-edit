@@ -1,0 +1,127 @@
+"""画面の共通部品: 手順の表示、ページ離脱の確認、再生が終わったら次の候補へ進む仕組み。"""
+import streamlit as st
+
+STEPS = ["動画を選ぶ", "解析", "確認", "書き出し"]
+
+# st.html は SVG を取り除く (2026-09-23 に Chrome で確認。完了の印が空の丸になった) ので、文字で描く
+_CHECK = '<span aria-hidden="true" style="font-size:13px;line-height:1;">✓</span>'
+_HIDDEN = "position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;"
+
+_PAGE_CSS = """
+<style>
+[data-testid="stMainBlockContainer"] { padding-top: 1.25rem; padding-bottom: 2.5rem; max-width: 1440px; }
+[data-testid="stMainBlockContainer"] h1 { font-size: 2rem; }
+[data-testid="stMainBlockContainer"] h2 { font-size: 1.6rem; padding: .2rem 0 .1rem; }
+[data-testid="stMainBlockContainer"] h3 { font-size: 1.25rem; padding: .2rem 0; }
+[data-testid="stHeader"] { background: transparent; }
+[data-testid="stMetricValue"] { font-size: 1.35rem; }
+</style>
+"""
+
+
+def apply_page_style() -> None:
+    """Streamlit 既定の広い上の余白と大きな見出しを詰める。
+
+    内部のクラス名はバージョンで変わるので、data-testid だけを使い、上書きは最小限にする。
+    """
+    st.html(_PAGE_CSS)
+
+
+def stepper_html(current: int) -> str:
+    """アプリ名と手順 (1 動画を選ぶ → 4 書き出し)。current は今の手順、5 はすべて完了。"""
+    items = []
+    for number, name in enumerate(STEPS, 1):
+        if number < current:
+            mark = (f'<span style="width:24px;height:24px;box-sizing:border-box;border-radius:50%;'
+                    f'border:1.5px solid #213A2F;display:flex;align-items:center;justify-content:center;">{_CHECK}</span>')
+            items.append(f'<li style="display:flex;align-items:center;gap:8px;color:#213A2F;">{mark}'
+                         f'<span style="{_HIDDEN}">完了した手順：</span>{name}</li>')
+        elif number == current:
+            mark = (f'<span style="width:24px;height:24px;border-radius:50%;background:#213A2F;color:#FFFFFF;'
+                    f'display:flex;align-items:center;justify-content:center;font-size:12px;">{number}</span>')
+            items.append(f'<li aria-current="step" style="display:flex;align-items:center;gap:8px;color:#213A2F;'
+                         f'font-weight:700;">{mark}{name}</li>')
+        else:
+            mark = (f'<span style="width:24px;height:24px;box-sizing:border-box;border-radius:50%;'
+                    f'border:1.5px solid #9DA396;display:flex;align-items:center;justify-content:center;'
+                    f'font-size:12px;">{number}</span>')
+            items.append(f'<li style="display:flex;align-items:center;gap:8px;color:#666B62;">{mark}{name}</li>')
+    return (
+        '<header style="display:flex;flex-wrap:wrap;align-items:center;gap:12px 48px;padding:0 0 14px;'
+        'border-bottom:1px solid #D5D8CC;">'
+        '<div style="font-size:17px;font-weight:700;letter-spacing:.06em;color:#213A2F;">かるた動画の短縮</div>'
+        '<ol aria-label="手順" style="position:relative;margin:0;padding:0;list-style:none;display:flex;'
+        'flex-wrap:wrap;gap:8px 28px;font-size:14px;">' + "".join(items) + "</ol></header>"
+    )
+
+
+def needs_leave_guard(state: int, saved: bool) -> bool:
+    """リロードやタブを閉じる前に確認するか。
+
+    確認中 (2) と書き出し中 (3) は、解析と確認の結果が消えて1〜数分かけて作り直しになる。
+    完了 (4) は、保存するまで短縮版が消える。
+    """
+    return state in (2, 3) or (state == 4 and not saved)
+
+
+_GUARD_JS = """
+export default function (component) {
+  const { data } = component;
+  if (!data || !data.active) return;
+  const onBeforeUnload = (e) => { e.preventDefault(); e.returnValue = ''; };
+  window.addEventListener('beforeunload', onBeforeUnload);
+  return () => window.removeEventListener('beforeunload', onBeforeUnload);
+}
+"""
+
+
+def leave_guard(active: bool) -> None:
+    """active の間、リロードやタブを閉じようとするとブラウザの確認を出す (文言はブラウザが決める)。"""
+    # 部品の登録は描くたびに行う (card_strip.card_strip と同じ理由)
+    component = st.components.v2.component("karuta_leave_guard", js=_GUARD_JS)
+    component(key="leave_guard", data={"active": active})
+
+
+_AUTO_ADVANCE_JS = """
+export default function (component) {
+  const { data } = component;
+  const root = document.documentElement;
+  root.dataset.karutaAutoAdvance = data.enabled ? 'on' : 'off';
+  if (!data.enabled) return;
+  let media = null;
+  let timer = null;
+  const advance = () => {
+    if (root.dataset.karutaAutoAdvance !== 'on') return;
+    const btn = [...document.querySelectorAll('button')].find((b) => b.innerText.trim().startsWith(data.nextLabel));
+    if (btn) btn.click();
+  };
+  const bind = () => {
+    const m = document.querySelector('video') || document.querySelector('audio');
+    if (!m) return false;
+    if (m.dataset.karutaAdvanceMarker === data.marker) return true;
+    m.dataset.karutaAdvanceMarker = data.marker;
+    m.addEventListener('ended', advance, { once: true });
+    media = m;
+    return true;
+  };
+  if (!bind()) {
+    let tries = 0;
+    timer = setInterval(() => { if (bind() || ++tries > 50) clearInterval(timer); }, 100);
+  }
+  return () => {
+    if (timer) clearInterval(timer);
+    if (media) media.removeEventListener('ended', advance);
+  };
+}
+"""
+
+
+def auto_advance(enabled: bool, marker: str, next_label: str) -> None:
+    """再生が終わったら「次の件」を押す。
+
+    Streamlit は再生終了を Python 側へ通知しないため、ページの <video>/<audio> の ended を購読する。
+    区間の長さだけ time.sleep して rerun する方式は採らない。待っている間はボタンが押せず、
+    その候補を残すか外すかを選べなくなるため。
+    """
+    component = st.components.v2.component("karuta_auto_advance", js=_AUTO_ADVANCE_JS)
+    component(key="auto_advance_script", data={"enabled": enabled, "marker": marker, "nextLabel": next_label})

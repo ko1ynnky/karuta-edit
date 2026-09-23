@@ -1,5 +1,4 @@
 import streamlit as st
-import streamlit.components.v1 as components
 import numpy as np
 import importlib.util
 import shutil
@@ -9,6 +8,7 @@ import sys
 import tempfile
 import os
 from card_strip import card_strip, neighbor, queue_steps, review_queue, strip_items
+from page_parts import apply_page_style, auto_advance, leave_guard, needs_leave_guard, stepper_html
 from poem_id import (
     MODEL_DOWNLOAD_MB,
     Recognizer,
@@ -69,65 +69,7 @@ def estimate_duration(segments: list[tuple[float, float]]) -> float:
     return sum(end - start for start, end in segments)
 
 
-_AUTO_ADVANCE_SCRIPT = """
-<script>
-(function () {
-  const doc = window.parent.document;
-  const enabled = __ENABLED__;
-  const marker = "__MARKER__";
-  const nextLabel = "__NEXT_LABEL__";
-
-  // 停止指示は発火時に読み直す。iframe が作り直されても
-  // 親要素に残ったリスナーが古い設定のまま動くのを防ぐため。
-  doc.documentElement.dataset.karutaAutoAdvance = enabled ? "on" : "off";
-  if (!enabled) return;
-
-  function advance() {
-    if (doc.documentElement.dataset.karutaAutoAdvance !== "on") return;
-    const btn = Array.from(doc.querySelectorAll("button")).find(
-      (b) => b.innerText.trim().startsWith(nextLabel)
-    );
-    if (btn) btn.click();
-  }
-
-  function bind() {
-    const media = doc.querySelector("video") || doc.querySelector("audio");
-    if (!media) return false;
-    if (media.dataset.karutaAdvanceMarker === marker) return true;
-    media.dataset.karutaAdvanceMarker = marker;
-    media.addEventListener("ended", advance, { once: true });
-    return true;
-  }
-
-  // Streamlit はメディア要素を段階的に描画するため、現れるまで待つ
-  if (!bind()) {
-    let tries = 0;
-    const timer = setInterval(function () {
-      if (bind() || ++tries > 50) clearInterval(timer);
-    }, 100);
-  }
-})();
-</script>
-"""
-
 NEXT_BUTTON_LABEL = "次の件"
-
-
-def render_auto_advance(enabled: bool, marker: str) -> None:
-    """再生終了で次の候補へ進むスクリプトを親ドキュメントへ仕込む。
-
-    Streamlit は再生終了を Python 側へ通知しないため、親ドキュメントの
-    <video>/<audio> の ended を直接購読する。区間長ぶん time.sleep して
-    rerun する方式は採らない。待機中はボタンが押せず、その候補に対する
-    はい/いいえの判定ができなくなるため。
-    """
-    html = (
-        _AUTO_ADVANCE_SCRIPT
-        .replace("__ENABLED__", "true" if enabled else "false")
-        .replace("__MARKER__", marker)
-        .replace("__NEXT_LABEL__", NEXT_BUTTON_LABEL)
-    )
-    components.html(html, height=0)
 
 
 _TK_DIALOG_CODE = """
@@ -228,6 +170,9 @@ if 'state' not in st.session_state:
 
 st.session_state.setdefault("uploader_gen", 0)
 
+apply_page_style()
+leave_guard(needs_leave_guard(st.session_state.state, st.session_state.get("saved", False)))
+
 SUPPORTED_EXTS = [".mp4", ".mov", ".webm", ".mkv"]
 
 
@@ -238,6 +183,7 @@ SUPPORTED_EXTS = [".mp4", ".mov", ".webm", ".mkv"]
 # 動画の指定と設定は、この段階だけに出す。確認・書き出しの画面に残すと、
 # 本来の内容が画面の下に押し出される (2026-09-23 の通しの操作で確認)。
 if st.session_state.state == 1:
+    st.html(stepper_html(1))
     url = "https://docs.google.com/presentation/d/1gG8EdmBDSkv82v8wLjVtbLoWbaBhAx5MWzBW1FoKmxg/edit?usp=sharing"
     st.write(f'[使い方・仕組み]({url})')
 
@@ -428,6 +374,7 @@ if st.session_state.state == 2:
     queue = review_queue(sorted_scores, readings)
     ss.setdefault("review_idx", queue[0] if queue else total_count)
     review_idx = ss.review_idx
+    st.html(stepper_html(3))
 
     def move(step: int) -> None:
         target = neighbor(queue, ss.review_idx, step)
@@ -516,8 +463,8 @@ if st.session_state.state == 2:
                 st.caption(
                     f"聞き取った言葉　直前「{reading.before_text}」　直後「{reading.after_text}」"
                 )
-            auto_advance = st.checkbox("自動で次の候補を再生する", value=False, key="auto_advance")
-            render_auto_advance(auto_advance, f"{review_idx}")
+            auto_next = st.checkbox("自動で次の候補を再生する", value=False, key="auto_advance")
+            auto_advance(auto_next, f"{review_idx}", NEXT_BUTTON_LABEL)
 
         with col_side:
             if readings and len(queue) <= 12:
@@ -571,6 +518,7 @@ if st.session_state.state == 2:
 # ---------------------------------------------------------------------------
 
 if st.session_state.state == 3:
+    st.html(stepper_html(4))
     before, after = st.session_state.clip_range
     waveform = st.session_state.waveform
     sorted_scores = st.session_state.sorted_scores
@@ -615,12 +563,25 @@ if st.session_state.state == 3:
 # State 4: ダウンロード
 # ---------------------------------------------------------------------------
 
+def _mark_saved() -> None:
+    st.session_state.saved = True
+
+
+def _start_over() -> None:
+    st.session_state.clear()
+
+
 if st.session_state.state == 4:
+    st.html(stepper_html(5))
     st.success('動画の編集が完了しました')
+    # 保存しても画面は消さない。以前は押した時点でセッションを消していたので、
+    # 保存に失敗したり保存先を間違えたりすると、作り直すしかなかった。
     st.download_button(
-        "ダウンロード",
+        "保存する",
         data=st.session_state.processed_video,
         file_name=shortened_file_name(st.session_state.source_name),
         mime="video/mp4",
-        on_click=lambda: st.session_state.clear(),
+        type="primary",
+        on_click=_mark_saved,
     )
+    st.button("別の動画を短縮する", on_click=_start_over)
