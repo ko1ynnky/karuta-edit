@@ -8,6 +8,15 @@ import subprocess
 import sys
 import tempfile
 import os
+from poem_id import (
+    MODEL_DOWNLOAD_MB,
+    Recognizer,
+    describe_reading,
+    ensure_model,
+    identify_readings,
+    resample_for_recognition,
+    short_label,
+)
 from reader_voice import compute_voiced_frames
 from utils import return_candidates
 from offline_app import (
@@ -135,6 +144,38 @@ print(path)
 """
 
 
+def identify_candidate_poems(
+    audio_path: str, tmpdir: str, sorted_scores: list[tuple[int, float]]
+) -> dict:
+    """候補ごとに読まれた歌を特定する。失敗しても空の結果を返し、編集は続けられるようにする。
+
+    歌の表示はレビューの補助なので、モデルを取得できない (オフラインなど) ときに
+    解析全体を止めない。
+    """
+    bar = st.progress(0.0, text="音声認識のモデルを準備中...")
+    shown = {"pct": -1}
+
+    def on_download(done: int, total: int) -> None:
+        pct = done * 100 // total
+        if pct != shown["pct"]:  # ブロックごとに呼ばれるので、1%ごとにだけ描き直す
+            shown["pct"] = pct
+            bar.progress(pct / 100, text=f"音声認識のモデルをダウンロード中... {done >> 20}/{total >> 20} MB")
+
+    def on_identify(done: int, total: int) -> None:
+        bar.progress(done / total, text=f"読まれた歌を特定中... {done}/{total}")
+
+    try:
+        model_dir = ensure_model(progress=on_download)
+        wav16k = resample_for_recognition(audio_path, os.path.join(tmpdir, "audio16k.wav"))
+        readings = identify_readings(
+            wav16k, [idx / 10.0 for idx, _ in sorted_scores], Recognizer(model_dir), progress=on_identify
+        )
+    except (OSError, RuntimeError, ImportError) as e:
+        st.warning(f"読まれた歌を特定できませんでした（{e}）。歌の表示なしで続けます。")
+        return {}
+    return {idx: reading for (idx, _), reading in zip(sorted_scores, readings)}
+
+
 def pick_video_file() -> str | None:
     """サーバ側でOSネイティブのファイル選択ダイアログを開き、選択パスを返す。
 
@@ -226,6 +267,20 @@ use_reader_voice = st.checkbox(
     ),
 )
 
+identify_poems = st.checkbox(
+    "読まれた歌を特定する",
+    value=False,
+    key="identify_poems",
+    disabled=st.session_state.state != 1,
+    help=(
+        "候補ごとに、読手の読みを音声認識で書き起こし、百人一首のどの歌の上の句・下の句かを"
+        "レビュー画面に表示します。下の句の読み始めに付いた候補（取りの場面ではない候補）も分かります。\n\n"
+        f"初回だけ、音声認識のモデル（約{MODEL_DOWNLOAD_MB}MB）をダウンロードします。"
+        "音声はこのPCの中だけで処理し、外部には送りません。"
+        "1試合で1〜2分ほどかかります（PCの性能によってはそれ以上）。"
+    ),
+)
+
 
 # file uploader
 # key を世代管理し、コピー完了後に世代を進めることで
@@ -306,6 +361,9 @@ if st.session_state.state == 1 and input_video_path is not None:
     voiced = compute_voiced_frames(audio_path) if use_reader_voice else None
     score_dict = return_candidates(waveform, voiced)
     sorted_scores = sorted(score_dict.items(), key=lambda x: x[0])
+    readings = (
+        identify_candidate_poems(audio_path, tmpdirname, sorted_scores) if identify_poems else {}
+    )
 
     st.session_state.update({
         "tmpdir": tmpdirname,
@@ -317,6 +375,7 @@ if st.session_state.state == 1 and input_video_path is not None:
         "segment_enabled": {idx: True for idx, _ in sorted_scores},
         "preview_clips": {},
         "review_idx": 0,
+        "readings": readings,
         "state": 2,
     })
     st.rerun()
@@ -392,6 +451,8 @@ if st.session_state.state == 2:
                 with col_btn:
                     prefix = ">> " if i == review_idx else ""
                     label = f"{prefix}#{i + 1} {format_time(s_start)} {s_score / 100:.2f}"
+                    if s_idx in st.session_state.readings:
+                        label += f" {short_label(st.session_state.readings[s_idx])}"
                     if st.button(label, key=f"sb_jump_{s_idx}"):
                         st.session_state.review_idx = i
                         st.rerun()
@@ -410,6 +471,8 @@ if st.session_state.state == 2:
             f"[{format_time(seg_start)} - {format_time(seg_end)}] &nbsp; "
             f"Score: {score / 100}"
         )
+        if idx in st.session_state.readings:
+            st.markdown(f"歌: {describe_reading(st.session_state.readings[idx])}")
 
         auto_advance = st.checkbox(
             "自動で次の候補を再生する",
