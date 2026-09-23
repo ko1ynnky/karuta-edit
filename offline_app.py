@@ -364,12 +364,16 @@ def get_video_bitrate_bps(input_video: str) -> int | None:
     return int((size_bytes * 8) / duration_sec)
 
 
+_KEYFRAME_INTERVAL_SEC = 0.5
+
+
 def _build_encode_options(
     input_video: str,
     encoder_mode: str,
     crf: int,
     preset: str,
     video_bitrate_scale: float,
+    frame_rate: float,
 ) -> tuple[dict[str, object], dict[str, object]]:
     """(区間の映像エンコード用, 最後に一括で行う音声エンコード用) のオプションを返す。"""
     if encoder_mode == "libx264":
@@ -393,12 +397,18 @@ def _build_encode_options(
         )
         maxrate_bps = int(target_bitrate_bps * 1.3)
         bufsize_bps = int(target_bitrate_bps * 2.0)
+        # -g を省くと ffmpeg の既定の 12 フレームになり、59.94fps の対局動画では
+        # データ量の約半分をキーフレームが占めて画質が落ちていた。0.5 秒より延ばしても
+        # 画質の伸びは小さく (1 秒で PSNR +0.3dB)、シークやコマ戻しで復号し直す量が増える。
+        # libx264 は x264 の既定 (250 フレーム) が使われ、CRF で画質を決めているので指定しない。
+        keyframe_interval = max(1, round(frame_rate * _KEYFRAME_INTERVAL_SEC))
 
         return (
             {
                 "vcodec": "h264_videotoolbox",
                 "profile:v": "high",
                 "fps_mode": "vfr",
+                "g": str(keyframe_interval),
                 "b:v": str(target_bitrate_bps),
                 "maxrate:v": str(maxrate_bps),
                 "bufsize:v": str(bufsize_bps),
@@ -538,6 +548,11 @@ def cut_and_concat_mp4(
         last_frame_duration = frame_times[-1] - frame_times[-2]
     else:
         last_frame_duration = 1 / 30
+    # iPhone の動画はフレーム間隔が一定でない (16.7ms の中に 18.3ms が混ざる) ので、
+    # 平均ではなく中央値で求める
+    frame_rate = (
+        1 / float(np.median(np.diff(frame_times))) if len(frame_times) >= 2 else 30.0
+    )
     emit_timing(
         "probe_frame_times",
         time.perf_counter() - probe_started_at,
@@ -741,6 +756,7 @@ def cut_and_concat_mp4(
             crf=crf,
             preset=preset,
             video_bitrate_scale=video_bitrate_scale,
+            frame_rate=frame_rate,
         )
 
     primary_decode_options = _build_decode_input_options(
