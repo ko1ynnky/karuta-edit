@@ -1,0 +1,141 @@
+"""短縮版の音声と映像の同期の仕様。
+
+競技かるたでは読みの音と動き出しの時間差が反応の速さそのものなので、
+短縮版の各区間で音と映像が 1 フレーム未満の精度でそろっている必要がある。
+再生アプリには音声をタイムスタンプではなくデコード順に続けて鳴らすもの
+(QuickTime など) があるため、音声を先頭から続けてデコードしたときにそろうことを確かめる。
+
+テスト素材は 59.94fps の映像で、97 フレームごとに 1 フレームだけ白く光り、
+同じ瞬間にビープ音が鳴り始める。
+"""
+import subprocess
+import sys
+
+import numpy as np
+import pytest
+
+from offline_app import cut_and_concat_mp4
+
+FPS = 60000 / 1001
+FLASH_EVERY = 97
+FLASH_PERIOD = FLASH_EVERY / FPS
+SR = 48000
+W, H = 32, 18
+
+# 区間の開始・終了はフレーム境界からずらしておく (実際の候補位置も 0.1 秒単位で、フレームとはそろわない)
+SEGMENTS = [
+    (1.234, 3.9),
+    (5.01, 7.77),
+    (9.333, 11.2),
+    (13.1, 16.05),
+    (18.47, 21.3),
+]
+# 1 フレームの 1/4。1 フレームずれるとテストが落ちる精度
+TOLERANCE_SEC = 0.25 / FPS
+
+ENCODER_MODES = ["libx264"] + (["videotoolbox_h264"] if sys.platform == "darwin" else [])
+
+
+def _make_source(path):
+    video = (
+        f"color=c=black:s=320x180:r=60000/1001:d=24,"
+        f"drawbox=x=0:y=0:w=iw:h=ih:color=white:t=fill:"
+        f"enable='eq(mod(n\\,{FLASH_EVERY})\\,0)'"
+    )
+    beep = f"0.5*sin(2*PI*1000*t)*lt(mod(t\\,{FLASH_PERIOD:.10f})\\,0.05)"
+    audio = f"aevalsrc=exprs='{beep}|{beep}':s={SR}:d=24"
+    subprocess.run(
+        ["ffmpeg", "-v", "error", "-f", "lavfi", "-i", video, "-f", "lavfi", "-i", audio,
+         "-c:v", "libx264", "-g", "60", "-pix_fmt", "yuv420p",
+         "-c:a", "aac", "-b:a", "192k", "-y", str(path)],
+        check=True,
+    )
+
+
+def _frame_times(path):
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "packet=pts_time", "-of", "csv=p=0", str(path)],
+        check=True, capture_output=True, text=True,
+    ).stdout
+    return np.sort([float(line.split(",")[0]) for line in out.split()])
+
+
+def _flash_times(path):
+    raw = subprocess.run(
+        ["ffmpeg", "-v", "error", "-i", str(path), "-map", "0:v:0",
+         "-vf", f"scale={W}:{H},format=gray", "-fps_mode", "passthrough",
+         "-f", "rawvideo", "-"],
+        check=True, capture_output=True,
+    ).stdout
+    brightness = np.frombuffer(raw, dtype=np.uint8).reshape(-1, H * W).mean(axis=1)
+    times = _frame_times(path)
+    assert len(times) == len(brightness)
+    return times[brightness > 128], times
+
+
+def _decoded_audio(path):
+    """先頭から続けてデコードした音声 (タイムスタンプの隙間や重なりは無視される)。"""
+    raw = subprocess.run(
+        ["ffmpeg", "-v", "error", "-i", str(path), "-map", "0:a:0",
+         "-ac", "1", "-f", "f32le", "-"],
+        check=True, capture_output=True,
+    ).stdout
+    return np.frombuffer(raw, dtype=np.float32)
+
+
+def _beep_onsets(audio):
+    loud = np.abs(audio) > 0.25
+    quiet_before = int(0.005 * SR)
+    onsets = []
+    last = -quiet_before
+    for i in np.flatnonzero(loud):
+        if i - last >= quiet_before:
+            onsets.append(i / SR)
+        last = i
+    return np.array(onsets)
+
+
+@pytest.fixture(scope="module")
+def source(tmp_path_factory):
+    path = tmp_path_factory.mktemp("src") / "source.mp4"
+    _make_source(path)
+    return path
+
+
+@pytest.fixture(scope="module", params=ENCODER_MODES)
+def shortened(request, source, tmp_path_factory):
+    out = tmp_path_factory.mktemp(request.param) / "short.mp4"
+    cut_and_concat_mp4(
+        input_video=str(source),
+        segments=SEGMENTS,
+        output_video=str(out),
+        encoder_mode=request.param,
+    )
+    return out
+
+
+def test_every_flash_is_heard_at_the_same_moment_it_is_seen(shortened):
+    flashes, _ = _flash_times(shortened)
+    onsets = _beep_onsets(_decoded_audio(shortened))
+    assert len(flashes) >= len(SEGMENTS)
+    errors = [onsets[np.argmin(np.abs(onsets - t))] - t for t in flashes]
+    assert np.max(np.abs(errors)) < TOLERANCE_SEC, [round(e * 1000, 1) for e in errors]
+
+
+def test_audio_does_not_outlast_video_when_decoded_continuously(shortened):
+    _, frame_times = _flash_times(shortened)
+    video_end = frame_times[-1] + 1 / FPS
+    audio_end = len(_decoded_audio(shortened)) / SR
+    # AAC は 1024 サンプル単位なので、最後の 1 フレーム分 (約 21ms) の端数だけ許す
+    assert abs(audio_end - video_end) < 1024 / SR
+
+
+def test_each_segment_keeps_the_frames_inside_its_range(source, shortened):
+    source_frames = _frame_times(source)
+    expected = sum(
+        int(np.sum((source_frames >= start) & (source_frames < end)))
+        for start, end in SEGMENTS
+    )
+    _, frame_times = _flash_times(shortened)
+    assert len(frame_times) == expected
