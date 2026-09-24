@@ -10,8 +10,13 @@ exe 実行時に Streamlit サーバーを起動し、ブラウザでアプリ�
 
 import importlib
 import os
+import socket
 import subprocess
 import sys
+import threading
+import time
+import urllib.request
+import webbrowser
 
 
 def _base_dir() -> str:
@@ -76,17 +81,63 @@ def self_test(base: str) -> list[str]:
     return problems
 
 
-def streamlit_argv(base: str, headless: bool) -> list[str]:
+def streamlit_argv(base: str, port: int) -> list[str]:
     return [
         "streamlit",
         "run",
         os.path.join(base, "streamlit_app.py"),
         "--global.developmentMode=false",
-        f"--server.headless={'true' if headless else 'false'}",
+        # headless でないと、Streamlit は初めての起動でターミナルにメールアドレスの入力欄を出して待つ。
+        # ダブルクリックで開くと答えられず、終了コード 255 ですぐ終わっていた。
+        # headless では Streamlit がブラウザを開かないので、open_browser_when_ready で開く
+        "--server.headless=true",
+        f"--server.port={port}",
         # 配布版では、読み込んだライブラリまで変更の見張りの対象になり、解析のあとは
         # 終了の合図 (SIGTERM) でも止まらなくなった。配布版は中身を書き換えないので見張らない
         "--server.fileWatcherType=none",
     ]
+
+
+def _port_is_free(port: int) -> bool:
+    with socket.socket() as s:
+        try:
+            s.bind(("", port))
+        except OSError:
+            return False
+        return True
+
+
+def pick_port(start: int = 8501, is_free=_port_is_free, tries: int = 50) -> int:
+    """start から空いている番号を探す。
+
+    Streamlit も空いていなければ次の番号を試すが、ポートを指定すると試さなくなり、
+    こちらもブラウザで開く番号を知る必要があるので、先に決めて渡す。
+    """
+    for port in range(start, start + tries):
+        if is_free(port):
+            return port
+    return start  # すべて埋まっていれば、Streamlit が「使用中」と出して終わる
+
+
+def _server_is_ready(port: int) -> bool:
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/_stcore/health", timeout=2) as r:
+            return r.read() == b"ok"
+    except OSError:
+        return False
+
+
+def open_browser_when_ready(url, is_ready, open_url, timeout: float = 120.0, interval: float = 0.5,
+                            sleep=time.sleep) -> bool:
+    """サーバーが応答したらブラウザで url を開く。timeout 秒たっても応答しなければ開かない。"""
+    waited = 0.0
+    while waited < timeout:
+        if is_ready():
+            open_url(url)
+            return True
+        sleep(interval)
+        waited += interval
+    return False
 
 
 def main() -> None:
@@ -111,8 +162,15 @@ def main() -> None:
 
     import streamlit.web.cli as stcli
 
+    port = pick_port()
+    sys.argv = streamlit_argv(base, port)
     # KARUTA_EDIT_HEADLESS=1 はブラウザを開かない (CI で起動を確かめるとき用)
-    sys.argv = streamlit_argv(base, headless=os.environ.get("KARUTA_EDIT_HEADLESS") == "1")
+    if os.environ.get("KARUTA_EDIT_HEADLESS") != "1":
+        threading.Thread(
+            target=open_browser_when_ready,
+            args=(f"http://localhost:{port}", lambda: _server_is_ready(port), webbrowser.open),
+            daemon=True,
+        ).start()
     sys.exit(stcli.main())
 
 

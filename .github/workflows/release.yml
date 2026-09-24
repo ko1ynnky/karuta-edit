@@ -69,7 +69,9 @@ jobs:
         run: dist/karuta-edit.app/Contents/MacOS/karuta-edit --self-test
       - name: 起動して画面と筆文字を返すか
         run: |
-          KARUTA_EDIT_HEADLESS=1 dist/karuta-edit.app/Contents/MacOS/karuta-edit > launch.log 2>&1 &
+          # 初めて使う人と同じく、Streamlit の設定ファイルがないホームで、入力なしで起動する。
+          # 初回だけ入力を待つような処理があると、ダブルクリックで開いたときにすぐ終わってしまう
+          HOME="$(mktemp -d)" KARUTA_EDIT_HEADLESS=1 dist/karuta-edit.app/Contents/MacOS/karuta-edit < /dev/null > launch.log 2>&1 &
           pid=$!
           for i in $(seq 60); do
             curl -sf http://localhost:8501/_stcore/health && break
@@ -136,8 +138,11 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: 起動して画面と筆文字を返すか
         run: |
+          # 初めて使う人と同じく、Streamlit の設定ファイルがないホームで、入力なしで起動する
+          $env:USERPROFILE = (New-Item -ItemType Directory -Path "$env:RUNNER_TEMP\empty-home").FullName
           $env:KARUTA_EDIT_HEADLESS = "1"
-          $p = Start-Process dist\karuta-edit\karuta-edit.exe -PassThru -RedirectStandardOutput launch.log -RedirectStandardError launch-err.log
+          New-Item -ItemType File empty-input.txt | Out-Null
+          $p = Start-Process dist\karuta-edit\karuta-edit.exe -PassThru -RedirectStandardInput empty-input.txt -RedirectStandardOutput launch.log -RedirectStandardError launch-err.log
           $ok = $false
           for ($i = 0; $i -lt 60; $i++) {
             try {
